@@ -34,12 +34,13 @@ L_KNEE,     R_KNEE     = 25, 26
 L_ANKLE,    R_ANKLE    = 27, 28
 
 # Weights
-REGION_WEIGHTS = {"upper": 1.0, "core": 0.6, "lower": 0.3}
+REGION_WEIGHTS = {"upper": 1.0, "core": 0.6, "lower": 0}
+
 PER_JOINT_WEIGHTS = {
     "l_elbow": 1.0, "r_elbow": 1.0,
     "l_shoulder": 0.9, "r_shoulder": 0.9,
     "l_hip": 0.6, "r_hip": 0.6,
-    "l_knee": 0.3, "r_knee": 0.3,
+    "l_knee": 0, "r_knee": 0,
 }
 
 def _angle(a, b, c):
@@ -63,36 +64,72 @@ def landmarks_to_pixels(landmarks_norm_list, w, h):
     return [(int(lm.x * w), int(lm.y * h)) for lm in landmarks_norm_list]
 
 def pose_embedding(pts):
+    """
+    Upper-body-only embedding (hips & up). Excludes knees/ankles entirely.
+    """
     emb = {
         "l_elbow":    _angle(pts[L_SHOULDER], pts[L_ELBOW],  pts[L_WRIST]),
         "r_elbow":    _angle(pts[R_SHOULDER], pts[R_ELBOW],  pts[R_WRIST]),
+
         "l_shoulder": _angle(pts[L_HIP],      pts[L_SHOULDER], pts[L_ELBOW]),
         "r_shoulder": _angle(pts[R_HIP],      pts[R_SHOULDER], pts[R_ELBOW]),
+
         "l_hip":      _angle(pts[L_SHOULDER], pts[L_HIP],    pts[L_KNEE]),
         "r_hip":      _angle(pts[R_SHOULDER], pts[R_HIP],    pts[R_KNEE]),
-        "l_knee":     _angle(pts[L_HIP],      pts[L_KNEE],   pts[L_ANKLE]),
-        "r_knee":     _angle(pts[R_HIP],      pts[R_KNEE],   pts[R_ANKLE]),
     }
     return emb
 
+
+JOINT_TOLERANCE_DEG = {
+    "l_elbow": 16.0, "r_elbow": 16.0,      # elbows: fairly precise
+    "l_shoulder": 18.0, "r_shoulder": 18.0,# shoulders: a bit more leeway
+    "l_hip": 20.0, "r_hip": 20.0,          # hips: most lenient of upper body
+}
+SCORE_DEG_SCALE = 120.0  # average post-tolerance error of 120° → ~0 score
+
+
+
 def pose_similarity(emb_a, emb_b):
+    """
+    Tolerant, upper-body-only similarity:
+    - Per-joint tolerance (no error within ±tol)
+    - Weighted average of remaining error
+    - Softer mapping to 0..100 via SCORE_DEG_SCALE
+    """
     total_w = 0.0
     weighted_err = 0.0
-    for k in emb_a.keys():
-        a = emb_a[k]; b = emb_b.get(k)
+    per_joint_err = {}
+
+    for k, a in emb_a.items():
+        b = emb_b.get(k)
         if a is None or b is None:
             continue
+
+        # shortest angular difference
         diff = abs(a - b)
         if diff > 180:
             diff = 360 - diff
+
+        # apply per-joint tolerance (free zone)
+        tol = JOINT_TOLERANCE_DEG.get(k, 0.0)
+        diff = max(0.0, diff - tol)
+
+        # weight
         w = _joint_weight(k)
         weighted_err += w * diff
         total_w += w
+        per_joint_err[k] = (diff, w)
+
     if total_w == 0:
         return 0.0, {"reason": "no comparable joints"}
+
     avg_err = weighted_err / total_w
-    score = max(0.0, 100.0 * (1.0 - (avg_err / 90.0)))
-    return score, {"avg_err_deg": avg_err}
+
+    # Softer score curve: 0 error → 100. If avg_err == SCORE_DEG_SCALE → ~0
+    score = max(0.0, 100.0 * (1.0 - (avg_err / SCORE_DEG_SCALE)))
+
+    return score, {"avg_err_deg": avg_err, "per_joint_err": per_joint_err}
+
 
 def draw_landmarks(frame_bgr, landmarks_norm_list, kp_color=KP_COLOR, bone_color=BONE_COLOR,
                    radius=LANDMARK_RADIUS, thickness=LINE_THICKNESS):
