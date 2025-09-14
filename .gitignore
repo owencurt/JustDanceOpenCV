@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.ipynb_checkpoints/
+
+# Models and large artifacts
+models/*.task
+models/*.onnx
+models/*.tflite
+
+# Media / outputs
+snapshots/
+recordings/
+*.png
+*.jpg
+*.jpeg
+*.mp4
+*.mov
+*.avi
+*.csv
+*.jsonl
+
+# Editors/IDE
+.vscode/
+.idea/
