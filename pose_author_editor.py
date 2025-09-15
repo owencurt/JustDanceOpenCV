@@ -1,8 +1,19 @@
 import sys, os, json, time, math
+os.environ["GLOG_minloglevel"] = "2"      # 0=INFO,1=WARNING,2=ERROR,3=FATAL
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # silence TensorFlow/TFLite C++ INFO/WARN
+
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
 import cv2
+try:
+    cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+except Exception:
+    pass
+
+from absl import logging as absl_logging
+absl_logging.set_verbosity(absl_logging.ERROR)
+
 import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -379,6 +390,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._move_clipboard: List[Move] = []
         
+        # --- Auto-fill (AI) ---
+        np.random.seed(1234)
+
+        self.autofill_step = QtWidgets.QSpinBox(); self.autofill_step.setRange(1, 16); self.autofill_step.setValue(1)
+        self.autofill_jitter = QtWidgets.QSpinBox(); self.autofill_jitter.setRange(0, 80); self.autofill_jitter.setValue(0)  # ms sampled around each beat
+        self.autofill_clear_chk = QtWidgets.QCheckBox("Clear existing moves first"); self.autofill_clear_chk.setChecked(False)
 
         # Audio player
         self.audio_output = QAudioOutput()
@@ -404,6 +421,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_init_frame = QtWidgets.QPushButton("Init From Frame (AI)")
         self.btn_init_blank.clicked.connect(self.canvas.init_pose_blank)
         self.btn_init_frame.clicked.connect(self.canvas.init_pose_from_frame)
+
+        self.btn_autofill = QtWidgets.QPushButton("Auto-Fill Beats (AI)")
+        self.btn_autofill.clicked.connect(self._auto_fill_beats)
+
+        
 
         # Transport
         self.btn_open = QtWidgets.QPushButton("Open Video")
@@ -499,6 +521,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_export.clicked.connect(self._export_chart)
         form.addRow(self.btn_export)
 
+        form.addRow(QtWidgets.QLabel("Auto-Fill every Nth beat"), self.autofill_step)
+        form.addRow(QtWidgets.QLabel("Sample jitter (±ms)"), self.autofill_jitter)
+        form.addRow(self.autofill_clear_chk)
+        form.addRow(self.btn_autofill)
+
         # Status bar
         self.status = self.statusBar()
         self.canvas.requestStatus.connect(self.status.showMessage)
@@ -557,6 +584,110 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._last_jump_ms is not None and self._last_jump_ms > now - 2:
             now = self._last_jump_ms
         return int(max(0, now))
+
+
+    def _all_beat_times_ms(self) -> list[int]:
+        """Return all beat times (ms) in [first_beat, video_end)."""
+        bpm = float(self.bpm_spin.value())
+        off = int(self.offset_spin.value())
+        dur = self._video_duration_ms()
+        if bpm <= 0 or dur <= 0:
+            return []
+        beat_ms = 60000.0 / bpm
+        # first k such that off + k*beat_ms >= 0
+        k0 = math.ceil((0 - off) / beat_ms) if off < 0 else 0
+        times = []
+        t = int(off + k0 * beat_ms)
+        while t < max(0, dur - 1):
+            times.append(int(t))
+            k0 += 1
+            t = int(off + k0 * beat_ms)
+        return times
+
+    def _auto_fill_beats(self):
+        if not self.canvas.cap:
+            self.status.showMessage("Open a video first.")
+            return
+        bpm = float(self.bpm_spin.value())
+        if bpm <= 0:
+            self.status.showMessage("Set a valid BPM first.")
+            return
+
+        # Prep
+        app = QtWidgets.QApplication.instance()
+        was_playing = self.canvas.playing
+        if was_playing:
+            self._toggle_play()  # pause both audio & video
+
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        self.btn_autofill.setEnabled(False)
+
+        try:
+            # Optionally clear existing moves
+            if self.autofill_clear_chk.isChecked():
+                self.moves.clear()
+
+            beat_times = self._all_beat_times_ms()
+            step = max(1, int(self.autofill_step.value()))
+            jitter = int(self.autofill_jitter.value())
+            added = 0
+
+            # Small local helper: try to detect at t and a couple tiny fallbacks
+            def try_detect_at(t_ms: int) -> Optional[PoseData]:
+                probe_times = [t_ms]
+                # slight fallbacks if detection fails at exact beat
+                for d in (-30, +30, -60, +60):
+                    probe_times.append(max(0, t_ms + d))
+                for probe in probe_times:
+                    self.canvas.seek_ms(probe)
+                    if self.player is not None:
+                        self.player.setPosition(probe)
+                    # let the frame settle
+                    if app: app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 5)
+                    self.canvas.init_pose_from_frame()
+                    pose = self.canvas.export_pose()
+                    if pose is not None:
+                        return pose
+                return None
+
+            for i, t in enumerate(beat_times):
+                if i % step != 0:
+                    continue
+                # optional jitter around the beat (uniform in ±jitter)
+                if jitter > 0:
+                    delta = np.random.randint(-jitter, jitter + 1)
+                    t = max(0, t + int(delta))
+
+                pose = try_detect_at(t)
+                if pose is None:
+                    # Skip silently; you can always hand-place later
+                    continue
+
+                mv = Move(
+                    name=f"Beat {i}",
+                    start_ms=int(t),
+                    mirror=True,
+                    weights=dict(GLOBAL_WEIGHTS),
+                    tolerance_deg=dict(GLOBAL_TOL),
+                    score_scale_deg=GLOBAL_SCALE_DEG,
+                    pose=pose
+                )
+                self.moves.append(mv)
+                added += 1
+
+                # keep UI alive and show progress
+                if app: app.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 1)
+                if added % 8 == 0:
+                    self.status.showMessage(f"Auto-fill: added {added} moves...")
+
+            # Sort & refresh table once at the end
+            self._refresh_moves_table()
+            self.status.showMessage(f"Auto-fill complete: added {added} move(s).")
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            self.btn_autofill.setEnabled(True)
+            if was_playing:
+                self._toggle_play()
 
 
         # ----- Beat jumping -----
