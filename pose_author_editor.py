@@ -378,6 +378,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(self.canvas)
 
         self._move_clipboard: List[Move] = []
+        
 
         # Audio player
         self.audio_output = QAudioOutput()
@@ -408,6 +409,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_open = QtWidgets.QPushButton("Open Video")
         self.btn_play = QtWidgets.QPushButton("Play/Pause")
         self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+
+        self.btn_next_beat = QtWidgets.QPushButton("Next Beat →")
+        self.btn_next_beat.clicked.connect(self._jump_to_next_beat)
+
+        self.btn_prev_beat = QtWidgets.QPushButton("← Prev Beat")
+        self.btn_prev_beat.clicked.connect(self._jump_to_prev_beat)
+
+        self.btn_next_beat = QtWidgets.QPushButton("Next Beat →")
+        self.btn_next_beat.clicked.connect(self._jump_to_next_beat)
+
+        self._last_jump_ms: Optional[int] = None  # remembers last seek/jump target
+
+
 
         # Moves Preview
         self.btn_preview_moves = QtWidgets.QPushButton("▶ Play Moves Preview")
@@ -473,6 +487,7 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow(self.grid_chk)
         form.addRow(self.btn_open, self.btn_play)
         form.addRow(self.slider)
+        form.addRow(self.btn_prev_beat, self.btn_next_beat)
         form.addRow(self.btn_preview_moves)
         form.addRow(self.btn_init_blank, self.btn_init_frame)
         form.addRow(QtWidgets.QLabel("Moves:"))
@@ -528,6 +543,79 @@ class MainWindow(QtWidgets.QMainWindow):
             e = max(e, s + 1)
             blocks.append((s, e, mv))
         return blocks
+    
+    def _current_clock_ms(self) -> int:
+        """Best-effort current media time in ms (prefers audio, falls back to video, then last jump)."""
+        vid = getattr(self.canvas, "current_ms", 0) or 0
+        aud = self.player.position() if self.player is not None else -1
+        # Prefer audio clock if valid; it usually tracks setPosition precisely.
+        if aud >= 0:
+            now = aud
+        else:
+            now = vid
+        # If we recently jumped and clocks haven't caught up, trust our last jump if it's later.
+        if self._last_jump_ms is not None and self._last_jump_ms > now - 2:
+            now = self._last_jump_ms
+        return int(max(0, now))
+
+
+        # ----- Beat jumping -----
+    def _next_beat_ms(self, current_ms: int) -> int:
+        """Compute the next beat strictly after current_ms."""
+        bpm = float(self.bpm_spin.value())
+        off = int(self.offset_spin.value())
+        dur = self._video_duration_ms()
+        if not self.canvas.cap or dur <= 0 or bpm <= 0:
+            return current_ms
+        beat_ms = 60000.0 / bpm
+        # index of the beat just before/at current_ms
+        k = math.floor((current_ms - off) / beat_ms)
+        # strictly next beat
+        next_ms = int(off + (k + 1) * beat_ms)
+        # clamp to just before the end (so a seek can still render a frame)
+        return max(0, min(next_ms, max(0, dur - 1)))
+
+    def _jump_to_next_beat(self):
+        if not self.canvas.cap:
+            self.status.showMessage("Open a video first.")
+            return
+        # +1ms so if we're exactly on-beat, we still move forward
+        now = self._current_clock_ms() + 1
+        target_ms = self._next_beat_ms(now)
+        self.canvas.seek_ms(target_ms)
+        if self.player is not None:
+            self.player.setPosition(target_ms)
+        self._last_jump_ms = target_ms
+        self.status.showMessage(f"Jumped to next beat: {target_ms} ms")
+
+        # ----- Beat jumping -----
+    def _prev_beat_ms(self, current_ms: int) -> int:
+        """Compute the previous beat strictly before current_ms."""
+        bpm = float(self.bpm_spin.value())
+        off = int(self.offset_spin.value())
+        dur = self._video_duration_ms()
+        if not self.canvas.cap or dur <= 0 or bpm <= 0:
+            return current_ms
+        beat_ms = 60000.0 / bpm
+        # index of the beat just after current_ms, then step back one
+        k = math.ceil((current_ms - off) / beat_ms) - 1
+        prev_ms = int(off + k * beat_ms)
+        return max(0, min(prev_ms, max(0, dur - 1)))
+
+    def _jump_to_prev_beat(self):
+        if not self.canvas.cap:
+            self.status.showMessage("Open a video first.")
+            return
+        # -1ms so if we're exactly on-beat, we still move backward
+        now = self._current_clock_ms() - 1
+        target_ms = self._prev_beat_ms(now)
+        self.canvas.seek_ms(target_ms)
+        if self.player is not None:
+            self.player.setPosition(target_ms)
+        self._last_jump_ms = target_ms
+        self.status.showMessage(f"Jumped to previous beat: {target_ms} ms")
+
+
 
     def _sequence_bounds(self, blocks) -> Tuple[int,int]:
         if not blocks: return (0,0)
@@ -871,6 +959,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.seek_ms(target_ms)
         if self.player is not None:
             self.player.setPosition(target_ms)
+        self._last_jump_ms = target_ms
+
 
     def _slider_released(self):
         self._user_scrubbing = False
