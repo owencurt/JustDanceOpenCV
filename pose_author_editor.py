@@ -1,5 +1,5 @@
 import sys, os, json, time, math
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
 import cv2
@@ -48,10 +48,9 @@ class PoseData:
 
 @dataclass
 class Move:
+    # Explicit time cues: hold this pose from start_ms until the next move's start_ms
     name: str
     start_ms: int
-    duration_beats: int
-    repeat: int
     mirror: bool
     weights: Dict[str, float]           # per move (defaults populated from global)
     tolerance_deg: Dict[str, float]
@@ -204,8 +203,6 @@ class VideoCanvas(QtWidgets.QWidget):
         if self.frame_bgr is None: return
         H, W = self.frame_bgr.shape[:2]
         cx, cy = 0.5, 0.45
-        span_x = 0.18
-        span_y = 0.22
         # Rough T pose
         init = {
             L_SHOULDER:(cx-0.06, cy), R_SHOULDER:(cx+0.06, cy),
@@ -223,13 +220,18 @@ class VideoCanvas(QtWidgets.QWidget):
         if res is None:
             self.requestStatus.emit("No pose detected on this frame.")
             return
-        H, W = self.frame_bgr.shape[:2]
         self.norm_xy = {}
         for idx in UPPER_INDICES:
             lm = res[idx]
             self.norm_xy[idx] = (float(lm.x), float(lm.y))
         self.update()
         self.requestStatus.emit("Initialized pose from frame.")
+
+    def _is_near_beat(self, ms: int, tol_ms: int = 80) -> bool:
+        if self.bpm <= 0: return False
+        beat_ms = 60000.0 / self.bpm
+        phase = (ms - self.offset_ms) % beat_ms
+        return (phase <= tol_ms) or (beat_ms - phase <= tol_ms)
 
     def paintEvent(self, e: QtGui.QPaintEvent):
         painter = QtGui.QPainter(self)
@@ -246,14 +248,16 @@ class VideoCanvas(QtWidgets.QWidget):
             pix = pix.scaled(self.width(), self.height(), QtCore.Qt.AspectRatioMode.KeepAspectRatio)
             painter.drawPixmap(0, 0, pix)
 
-        # Beat grid (vertical lines)
-        if self.show_grid and self.bpm > 0:
-            beat_ms = 60000.0 / self.bpm
-            # compute leftmost time visible approx. (we're drawing on the frame only; simple marker header)
-            painter.setPen(QtGui.QPen(QtGui.QColor(255,255,255,120), 1))
-            # draw a small ruler at top showing nearest beats
-            # draw current time
-            painter.drawText(10, 20, f"{self.current_ms} ms")
+        # Beat flash (visual metronome)
+        if self.show_grid and self._is_near_beat(self.current_ms):
+            pen = QtGui.QPen(QtGui.QColor(255, 255, 0, 180), 8)
+            painter.setPen(pen)
+            painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            painter.drawRect(4, 4, self.width()-8, self.height()-8)
+
+        # Current time text
+        painter.setPen(QtGui.QPen(QtGui.QColor(255,255,255,220), 1))
+        painter.drawText(10, 20, f"{self.current_ms} ms")
 
         # Pose overlay
         if self.norm_xy:
@@ -335,22 +339,16 @@ class AddMoveDialog(QtWidgets.QDialog):
 
         self.name = QtWidgets.QLineEdit("New Move")
         self.start = QtWidgets.QSpinBox(); self.start.setRange(0, 10_000_000); self.start.setValue(default_start_ms)
-        self.dur = QtWidgets.QSpinBox(); self.dur.setRange(1, 64); self.dur.setValue(4)
-        self.repeat = QtWidgets.QSpinBox(); self.repeat.setRange(1, 64); self.repeat.setValue(2)
         self.mirror = QtWidgets.QCheckBox(); self.mirror.setChecked(True)
 
         # override boxes (optional)
-        self.override = QtWidgets.QCheckBox("Override defaults (weights/tolerance/scale)")
+        self.override = QtWidgets.QCheckBox("Override defaults (tolerance/scale)")
         self.scale = QtWidgets.QDoubleSpinBox(); self.scale.setRange(10.0, 360.0); self.scale.setValue(GLOBAL_SCALE_DEG)
         self.scale.setEnabled(False)
-
-        def_en = lambda w: self.scale.setEnabled(w)
-        self.override.toggled.connect(def_en)
+        self.override.toggled.connect(lambda v: self.scale.setEnabled(v))
 
         layout.addRow("Name", self.name)
         layout.addRow("Start (ms)", self.start)
-        layout.addRow("Duration (beats)", self.dur)
-        layout.addRow("Repeat", self.repeat)
         layout.addRow("Mirror", self.mirror)
         layout.addRow(self.override)
         layout.addRow("Score scale (deg)", self.scale)
@@ -365,8 +363,6 @@ class AddMoveDialog(QtWidgets.QDialog):
         return {
             "name": self.name.text().strip(),
             "start_ms": int(self.start.value()),
-            "duration_beats": int(self.dur.value()),
-            "repeat": int(self.repeat.value()),
             "mirror": bool(self.mirror.isChecked()),
             "override": bool(self.override.isChecked()),
             "scale": float(self.scale.value())
@@ -389,7 +385,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.player.setAudioOutput(self.audio_output)
         self.audio_output.setVolume(0.75)  # 75% volume to start
 
-
         # Right panel: controls
         dock = QtWidgets.QDockWidget("Controls", self); dock.setAllowedAreas(
             QtCore.Qt.DockWidgetArea.LeftDockWidgetArea | QtCore.Qt.DockWidgetArea.RightDockWidgetArea
@@ -400,7 +395,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.title_edit = QtWidgets.QLineEdit("My Dance")
         self.bpm_spin = QtWidgets.QDoubleSpinBox(); self.bpm_spin.setRange(30.0, 240.0); self.bpm_spin.setValue(DEFAULT_BPM)
         self.offset_spin = QtWidgets.QSpinBox(); self.offset_spin.setRange(0, 100000); self.offset_spin.setValue(DEFAULT_OFFSET_MS)
-        self.grid_chk = QtWidgets.QCheckBox("Show beat grid"); self.grid_chk.setChecked(True)
+        self.grid_chk = QtWidgets.QCheckBox("Show beat flash"); self.grid_chk.setChecked(True)
         self.grid_chk.toggled.connect(lambda v: setattr(self.canvas, "show_grid", v))
 
         # Pose init buttons
@@ -414,9 +409,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_play = QtWidgets.QPushButton("Play/Pause")
         self.slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
 
+        # Moves Preview
         self.btn_preview_moves = QtWidgets.QPushButton("▶ Play Moves Preview")
         self.btn_preview_moves.clicked.connect(self._toggle_moves_preview)
-        form.addRow(self.btn_preview_moves)
 
         # Moves preview state
         self._moves_previewing = False
@@ -426,7 +421,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._preview_t0_ms = 0    # wallclock ms when preview started
         self._sequence_start_ms = 0
         self._saved_overlay = None  # to restore user's editing pose afterwards
-
 
         # scrubbing state
         self._user_scrubbing = False
@@ -441,11 +435,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Moves table
         self.moves: List[Move] = []
-        self.table = QtWidgets.QTableWidget(0, 5)
+        self.table = QtWidgets.QTableWidget(0, 3)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
-        self.table.setHorizontalHeaderLabels(["Name","Start(ms)","Dur(beats)","Repeat","Mirror"])
+        self.table.setHorizontalHeaderLabels(["Name","Start(ms)","Mirror"])
         self.table.horizontalHeader().setStretchLastSection(True)
+
+        # Allow inline editing
+        self.table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked |
+            QtWidgets.QAbstractItemView.EditTrigger.SelectedClicked |
+            QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+        )
+        self.table.itemChanged.connect(self._on_table_item_changed)
+
+        # Guard to avoid recursion while refreshing
+        self._refreshing_table = False
+
 
         self.btn_add_move = QtWidgets.QPushButton("Add Move")
         self.btn_add_move.clicked.connect(self._add_move)
@@ -454,23 +460,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_paste = QtWidgets.QPushButton("Paste After Selection")
         self.btn_copy.clicked.connect(self._copy_moves)
         self.btn_paste.clicked.connect(self._paste_moves)
+        
+        self.btn_delete = QtWidgets.QPushButton("Delete Selected")
+        self.btn_delete.clicked.connect(self._delete_moves)
+        form.addRow(self.btn_delete)
 
-        form.addRow(self.btn_copy, self.btn_paste)
 
-
-        self.btn_export = QtWidgets.QPushButton("Export JSON")
-        self.btn_export.clicked.connect(self._export_chart)
-
+        # Layout order
         form.addRow("Title", self.title_edit)
         form.addRow("BPM", self.bpm_spin)
         form.addRow("Offset (ms)", self.offset_spin)
         form.addRow(self.grid_chk)
         form.addRow(self.btn_open, self.btn_play)
         form.addRow(self.slider)
+        form.addRow(self.btn_preview_moves)
         form.addRow(self.btn_init_blank, self.btn_init_frame)
         form.addRow(QtWidgets.QLabel("Moves:"))
         form.addRow(self.table)
         form.addRow(self.btn_add_move)
+        form.addRow(self.btn_copy, self.btn_paste)
+
+        self.btn_export = QtWidgets.QPushButton("Export JSON")
+        self.btn_export.clicked.connect(self._export_chart)
         form.addRow(self.btn_export)
 
         # Status bar
@@ -483,6 +494,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.resize(1100, 720)
 
+        # Optional small drift corrector to resync audio to video every second
+        self._drift_timer = QtCore.QTimer(self)
+        self._drift_timer.timeout.connect(self._correct_av_drift)
+        self._drift_timer.start(1000)
+
+    # ----- Transport / Keys -----
     def _toggle_play(self):
         if not self.canvas.cap:
             return
@@ -492,26 +509,88 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.player.pause()
 
+    def keyPressEvent(self, e: QtGui.QKeyEvent):
+        if e.key() == QtCore.Qt.Key.Key_Space:
+            self._toggle_play()
+        else:
+            super().keyPressEvent(e)
+
+    # ----- Preview schedule (explicit times) -----
     def _build_moves_schedule(self) -> List[Tuple[int,int,Move]]:
-        """Expand moves with repeat into time blocks; returns sorted [(start,end,move), ...]."""
-        if not self.moves:
-            return []
-        beat_ms = self._beat_ms()
+        """Expand to [(start,end,move)] using next move's start as end; last ends at video end."""
+        if not self.moves: return []
+        ms = sorted(self.moves, key=lambda m: m.start_ms)
         blocks = []
-        for mv in self.moves:
-            seg_ms = int(mv.duration_beats * beat_ms)
-            for r in range(mv.repeat):
-                s = mv.start_ms + r * seg_ms
-                e = s + seg_ms
-                blocks.append((s, e, mv))
-        blocks.sort(key=lambda x: x[0])
+        video_end = self._video_duration_ms()
+        for i, mv in enumerate(ms):
+            s = mv.start_ms
+            e = (ms[i+1].start_ms if i+1 < len(ms) else video_end)
+            e = max(e, s + 1)
+            blocks.append((s, e, mv))
         return blocks
 
     def _sequence_bounds(self, blocks) -> Tuple[int,int]:
         if not blocks: return (0,0)
-        start = min(b[0] for b in blocks)
-        end   = max(b[1] for b in blocks)
-        return (start, end)
+        return (blocks[0][0], blocks[-1][1])
+
+    def _delete_moves(self):
+        rows = sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)
+        if not rows:
+            self.status.showMessage("Select one or more moves to delete.")
+            return
+
+        for r in rows:
+            if 0 <= r < len(self.moves):
+                self.moves.pop(r)
+        self._refresh_moves_table()
+        self.status.showMessage(f"Deleted {len(rows)} move(s).")
+
+    def keyPressEvent(self, e: QtGui.QKeyEvent):
+        if e.key() == QtCore.Qt.Key.Key_Space:
+            self._toggle_play()
+        elif e.key() == QtCore.Qt.Key.Key_Delete:
+            self._delete_moves()
+        else:
+            super().keyPressEvent(e)
+
+
+
+    def _on_table_item_changed(self, item: QtWidgets.QTableWidgetItem):
+        if self._refreshing_table:
+            return  # ignore our own writes
+
+        r = item.row()
+        c = item.column()
+        if r < 0 or r >= len(self.moves):
+            return
+
+        mv = self.moves[r]
+        text = item.text().strip()
+
+        try:
+            if c == 0:
+                # name
+                mv.name = text or mv.name
+            elif c == 1:
+                # start_ms
+                new_ms = int(text)
+                mv.start_ms = max(0, new_ms)
+            elif c == 2:
+                # mirror (accept yes/no/true/false/1/0)
+                t = text.lower()
+                mv.mirror = t in ("yes", "true", "1", "y")
+            else:
+                return
+        except Exception as e:
+            # Revert cell on parse error
+            self.status.showMessage(f"Invalid value: {e}")
+            self._refresh_moves_table()
+            return
+
+        # Re-sort after edits that affect ordering
+        if c in (1,):
+            self._refresh_moves_table()
+
 
     def _toggle_moves_preview(self):
         if self._moves_previewing:
@@ -534,7 +613,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._saved_overlay = dict(self.canvas.norm_xy) if self.canvas.norm_xy else None
 
         # Compute full sequence bounds and seek everything to start
-        seq_start, seq_end = self._sequence_bounds(self._moves_schedule)
+        seq_start, _seq_end = self._sequence_bounds(self._moves_schedule)
         self._sequence_start_ms = seq_start
         self.canvas.seek_ms(seq_start)
         if self.player is not None:
@@ -547,7 +626,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.player.play()
 
         # Start timing
-        self._preview_t0_ms = int(time.time() * 1000) - 0  # wallclock anchor
+        self._preview_t0_ms = int(time.time() * 1000)
         self._moves_previewing = True
         self.btn_preview_moves.setText("■ Stop Preview")
         self.status.showMessage("Playing moves preview...")
@@ -565,7 +644,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.player is not None:
             self.player.pause()
 
-        # Restore editor overlay pose (so you keep editing where you left off)
+        # Restore editor overlay pose
         if self._saved_overlay is not None:
             self.canvas.norm_xy = dict(self._saved_overlay)
             self.canvas.update()
@@ -578,7 +657,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Derive current video time (prefer the actual video clock)
         vid_ms = self.canvas.current_ms
-        # Fall back to wallclock if needed:
         if vid_ms <= 0 and self._sequence_start_ms:
             now = int(time.time() * 1000)
             vid_ms = self._sequence_start_ms + (now - self._preview_t0_ms)
@@ -593,36 +671,74 @@ class MainWindow(QtWidgets.QMainWindow):
         # Update overlay to the active move pose
         if active is not None:
             _s, _e, mv = active
-            # Set the authored pose as overlay
             self.canvas.set_pose_from_norm(mv.pose.norm_xy)
-
-            # Optional: draw helpful status
-            beats_left = max(0, int((_e - vid_ms) / max(1, self._beat_ms())))
-            self.status.showMessage(f"Move: {mv.name}  |  {vid_ms - _s} / {_e - _s} ms  |  beats left: {beats_left}")
+            self.status.showMessage(f"Move: {mv.name}  |  {vid_ms - _s} / {_e - _s} ms")
         else:
-            # No active block — if we've passed the end, stop preview
-            seq_start, seq_end = self._sequence_bounds(self._moves_schedule)
+            # Past the end?
+            _seq_start, seq_end = self._sequence_bounds(self._moves_schedule)
             if vid_ms >= seq_end:
                 self._stop_moves_preview()
 
+    # ----- Copy / Paste (relative timing preserved) -----
+    def _copy_moves(self):
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if not rows:
+            self.status.showMessage("Select one or more moves to copy.")
+            return
+        self._move_clipboard = [self.moves[r] for r in rows]
+        # sort clipboard by time for sanity
+        self._move_clipboard.sort(key=lambda m: m.start_ms)
+        self.status.showMessage(f"Copied {len(self._move_clipboard)} move(s).")
 
-    def keyPressEvent(self, e: QtGui.QKeyEvent):
-        if e.key() == QtCore.Qt.Key.Key_Space:
-            self._toggle_play()
+    def _paste_moves(self):
+        if not self._move_clipboard:
+            self.status.showMessage("Clipboard is empty. Copy moves first.")
+            return
+
+        # Selection-aware insertion point
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        if rows:
+            sel_starts = [self.moves[r].start_ms for r in rows]
+            sel_first = min(sel_starts)
+            sel_last  = max(sel_starts)
+            sel_span  = sel_last - sel_first
+            # Start AFTER the selection's span (keeps the same delay you had)
+            end_after = sel_last + sel_span if sel_span > 0 else sel_last
+        elif self.moves:
+            # No selection: infer a reasonable gap from the last two moves
+            all_starts = sorted(m.start_ms for m in self.moves)
+            last = all_starts[-1]
+            prev = all_starts[-2] if len(all_starts) >= 2 else None
+            last_gap = (last - prev) if prev is not None else 2000  # default 2s if no info
+            end_after = last + max(1, last_gap)
+            sel_first = self._move_clipboard[0].start_ms  # used below to compute relative offsets
         else:
-            super().keyPressEvent(e)
+            end_after = 0
+            sel_first = self._move_clipboard[0].start_ms
 
-    def _beat_ms(self) -> float:
-        return 60000.0 / max(1e-6, self.bpm_spin.value())
+        # Preserve relative offsets within the copied selection
+        src_sorted = sorted(self._move_clipboard, key=lambda m: m.start_ms)
+        base = src_sorted[0].start_ms
+        new_moves = []
+        for src in src_sorted:
+            new_start = end_after + (src.start_ms - base)
+            mv = Move(
+                name=src.name,
+                start_ms=new_start,
+                mirror=src.mirror,
+                weights=dict(src.weights),
+                tolerance_deg=dict(src.tolerance_deg),
+                score_scale_deg=src.score_scale_deg,
+                pose=src.pose
+            )
+            new_moves.append(mv)
 
-    def _move_block_length_ms(self, mv: Move) -> int:
-        # whole repeated block length
-        return int(mv.duration_beats * self._beat_ms() * mv.repeat)
+        self.moves.extend(new_moves)
+        self._refresh_moves_table()
+        self.status.showMessage(f"Pasted {len(new_moves)} move(s) starting at {end_after} ms.")
 
-    def _move_end_ms(self, mv: Move) -> int:
-        return mv.start_ms + self._move_block_length_ms(mv)
 
-    # --- UI helpers ---
+    # ----- UI helpers -----
     def _open_video(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Video", "", "Video Files (*.mp4 *.mov *.avi)")
         if not path: return
@@ -631,7 +747,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.player.setSource(QUrl.fromLocalFile(path))
         # keep position aligned on fresh load
         self.player.setPosition(0)
-
         self._update_grid()
 
     def _update_grid(self):
@@ -647,55 +762,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.slider.setValue(max(0, min(1000, val)))
         self.slider.blockSignals(False)
 
-    def _copy_moves(self):
-        rows = sorted({i.row() for i in self.table.selectedIndexes()})
-        if not rows:
-            self.status.showMessage("Select one or more moves to copy.")
-            return
-        self._move_clipboard = [self.moves[r] for r in rows]
-        self.status.showMessage(f"Copied {len(self._move_clipboard)} move(s).")
-
-    def _paste_moves(self):
-        if not self._move_clipboard:
-            self.status.showMessage("Clipboard is empty. Copy moves first.")
-            return
-        # Base insertion point:
-        # 1) if there is a selection, paste after the last selected move’s end
-        # 2) else paste after the last move’s end (or 0 if no moves)
-        rows = sorted({i.row() for i in self.table.selectedIndexes()})
-        if rows:
-            end_after = max(self._move_end_ms(self.moves[r]) for r in rows)
-        elif self.moves:
-            end_after = max(self._move_end_ms(m) for m in self.moves)
-        else:
-            end_after = 0
-
-        # Paste a *sequence* of copied moves, preserving their relative order,
-        # each starting immediately after the previous pasted block ends.
-        cur_start = end_after
-        new_moves = []
-        for src in self._move_clipboard:
-            # shallow clone with adjusted start_ms (other fields kept)
-            mv = Move(
-                name=src.name,
-                start_ms=cur_start,
-                duration_beats=src.duration_beats,
-                repeat=src.repeat,
-                mirror=src.mirror,
-                weights=dict(src.weights),
-                tolerance_deg=dict(src.tolerance_deg),
-                score_scale_deg=src.score_scale_deg,
-                pose=src.pose  # OK to reuse pose object; immutable in practice
-            )
-            new_moves.append(mv)
-            cur_start += self._move_block_length_ms(mv)
-
-        # Append and refresh
-        self.moves.extend(new_moves)
-        self._refresh_moves_table()
-        self.status.showMessage(f"Pasted {len(new_moves)} move(s) after {end_after} ms.")
-
-
     def _add_move(self):
         # ensure we have a pose
         pose = self.canvas.export_pose()
@@ -706,33 +772,42 @@ class MainWindow(QtWidgets.QMainWindow):
         if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         data = dlg.get()
-        weights = dict(GLOBAL_WEIGHTS)
-        tol = dict(GLOBAL_TOL)
-        scale = GLOBAL_SCALE_DEG
-        if data["override"]:
-            scale = data["scale"]
         mv = Move(
             name=data["name"],
             start_ms=data["start_ms"],
-            duration_beats=data["duration_beats"],
-            repeat=data["repeat"],
             mirror=data["mirror"],
-            weights=weights,
-            tolerance_deg=tol,
-            score_scale_deg=scale,
+            weights=dict(GLOBAL_WEIGHTS),
+            tolerance_deg=dict(GLOBAL_TOL),
+            score_scale_deg=(data["scale"] if data["override"] else GLOBAL_SCALE_DEG),
             pose=pose
         )
         self.moves.append(mv)
         self._refresh_moves_table()
 
     def _refresh_moves_table(self):
-        self.table.setRowCount(len(self.moves))
-        for r, mv in enumerate(self.moves):
-            self.table.setItem(r,0, QtWidgets.QTableWidgetItem(mv.name))
-            self.table.setItem(r,1, QtWidgets.QTableWidgetItem(str(mv.start_ms)))
-            self.table.setItem(r,2, QtWidgets.QTableWidgetItem(str(mv.duration_beats)))
-            self.table.setItem(r,3, QtWidgets.QTableWidgetItem(str(mv.repeat)))
-            self.table.setItem(r,4, QtWidgets.QTableWidgetItem("Yes" if mv.mirror else "No"))
+        self._refreshing_table = True
+        try:
+            # Keep moves sorted by start time
+            self.moves.sort(key=lambda m: m.start_ms)
+            self.table.setRowCount(len(self.moves))
+            for r, mv in enumerate(self.moves):
+                # Name
+                item0 = QtWidgets.QTableWidgetItem(mv.name)
+                # Start (ms)
+                item1 = QtWidgets.QTableWidgetItem(str(mv.start_ms))
+                # Mirror (Yes/No)
+                item2 = QtWidgets.QTableWidgetItem("Yes" if mv.mirror else "No")
+
+                # Make them editable
+                for it in (item0, item1, item2):
+                    it.setFlags(it.flags() | QtCore.Qt.ItemFlag.ItemIsEditable)
+
+                self.table.setItem(r, 0, item0)
+                self.table.setItem(r, 1, item1)
+                self.table.setItem(r, 2, item2)
+        finally:
+            self._refreshing_table = False
+
 
     def _export_chart(self):
         title = self.title_edit.text().strip() or "My Dance"
@@ -756,8 +831,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return {
                 "name": m.name,
                 "start_ms": m.start_ms,
-                "duration_beats": m.duration_beats,
-                "repeat": m.repeat,
                 "mirror": m.mirror,
                 "weights": m.weights,
                 "tolerance_deg": m.tolerance_deg,
@@ -768,6 +841,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 }
             }
         data = {
+            "schema_version": 2,
             "title": chart.title,
             "video_path": chart.video_path,
             "bpm": chart.bpm,
@@ -777,23 +851,25 @@ class MainWindow(QtWidgets.QMainWindow):
         with open(out_path, "w") as f:
             json.dump(data, f, indent=2)
         self.status.showMessage(f"Saved {out_path}")
-    
+
     def _video_duration_ms(self) -> int:
         if not self.canvas.cap: return 0
         frames = int(self.canvas.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = self.canvas.video_fps or 30
+        if fps <= 0: return 0
         return int(frames / fps * 1000)
 
+    # ----- Slider scrubbing -----
     def _slider_pressed(self):
         self._user_scrubbing = True
 
     def _slider_moved(self, val: int):
         # preview seek while dragging
         dur = self._video_duration_ms()
+        if dur <= 0: return
         target_ms = int(dur * (val / 1000.0))
         self.canvas.seek_ms(target_ms)
-        # keep audio (if enabled) in sync too
-        if hasattr(self, "player") and self.player is not None:
+        if self.player is not None:
             self.player.setPosition(target_ms)
 
     def _slider_released(self):
@@ -803,11 +879,19 @@ class MainWindow(QtWidgets.QMainWindow):
         # Handle direct clicks on slider track (when not dragging)
         if self._user_scrubbing: return
         dur = self._video_duration_ms()
+        if dur <= 0: return
         target_ms = int(dur * (val / 1000.0))
         self.canvas.seek_ms(target_ms)
-        if hasattr(self, "player") and self.player is not None:
+        if self.player is not None:
             self.player.setPosition(target_ms)
 
+    # ----- Drift corrector (optional) -----
+    def _correct_av_drift(self):
+        if not self.canvas.cap: return
+        vid_ms = self.canvas.current_ms
+        aud_ms = self.player.position()
+        if abs(vid_ms - aud_ms) > 80:  # >80 ms drift -> correct
+            self.player.setPosition(vid_ms)
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
