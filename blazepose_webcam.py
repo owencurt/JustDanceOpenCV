@@ -17,7 +17,7 @@ PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
 
 # --- Config: JSON choreo + scoring window + thresholds ---
 CHOREO_JSON_PATH = "charts/test.json"     # <-- set this to your JSON file
-WINDOW_HALF_MS = 250                      # default ±250ms; tweak as desired
+WINDOW_HALF_MS = 150                      # default ±250ms; tweak as desired
 TIER_THRESHOLDS = DEFAULT_THRESHOLDS      # or override: {"perfect": 90, "great": 78, ...}
 
 # --- Start/Control ---
@@ -91,7 +91,7 @@ JOINT_TOLERANCE_DEG = {
     "l_shoulder": 18.0, "r_shoulder": 18.0,
     "l_hip": 20.0, "r_hip": 20.0,
 }
-SCORE_DEG_SCALE = 120.0  # average post-tolerance error of 120° → ~0 score
+SCORE_DEG_SCALE = 100.0  # average post-tolerance error of 120° → ~0 score
 
 def pose_similarity(emb_a, emb_b):
     total_w = 0.0
