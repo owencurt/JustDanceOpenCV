@@ -51,6 +51,20 @@ PER_JOINT_WEIGHTS = {
     "l_knee": 0, "r_knee": 0,
 }
 
+# --- Pose zoom constants ---
+UPCOMING_POSE_ZOOM = 2.00   # >1.0 = bigger, <1.0 = smaller
+CURRENT_POSE_ZOOM = 1.5
+
+# --- Tier UI ---
+TIER_COLORS = {
+    "perfect": (80, 255, 120),
+    "great":   (80, 200, 255),
+    "good":    (255, 200, 80),
+    "ok":      (240, 180, 80),
+    "miss":    (90, 90, 90),
+}
+
+
 def _angle(a, b, c):
     ax, ay = a; bx, by = b; cx, cy = c
     v1 = (ax - bx, ay - by); v2 = (cx - bx, cy - by)
@@ -183,93 +197,10 @@ def draw_idle_overlay(frame_bgr, moves, window_half_ms):
         draw_text_shadow(frame_bgr, f"First move '{first.name}' at {first.start_ms} ms (window ±{window_half_ms} ms)",
                          (10, 84), scale=0.7, color=(200, 200, 200))
 
-def draw_upcoming_overlay(frame_bgr, moves, game_ts_ms, max_items=6):
-    """Top-right panel: next move ETA + progress bar + tiny ghost of the next pose, then the following moves."""
-    H, W = frame_bgr.shape[:2]
-    pad = 10
-    line_h = 22
-    x0 = W - 360
-    y0 = 20
-    panel_w = 350
-
-    # Filter upcoming moves
-    upcoming = [m for m in moves if m.start_ms >= game_ts_ms][:max_items]
-
-    # Estimate panel height (header + next line + bar + ghost + others)
-    ghost_h = 110     # height in px for the tiny ghost
-    ghost_gap = 8
-    base_h = line_h * 2 + pad*2                   # header + one line spacer
-    bar_h  = 10 + 12                               # bar + gap below it
-    if upcoming:
-        others = max(0, len(upcoming) - 1)
-        panel_h = base_h + bar_h + ghost_h + ghost_gap + (others * line_h)
-    else:
-        panel_h = base_h
-
-    # Translucent panel bg
-    overlay = frame_bgr.copy()
-    cv2.rectangle(overlay, (x0, y0), (x0+panel_w, y0+panel_h), (30, 30, 30), -1)
-    frame_bgr[:] = cv2.addWeighted(overlay, 0.35, frame_bgr, 0.65, 0)
-
-    # Header
-    draw_text_shadow(frame_bgr, "UPCOMING", (x0+pad, y0+pad+16), scale=0.7, color=(180, 220, 255))
-
-    y = y0 + pad + 16 + 8
-
-    if not upcoming:
-        draw_text_shadow(frame_bgr, "No more moves.", (x0+pad, y+line_h), scale=0.7, color=(200,200,200))
-        return
-
-    # First (next) move with progress bar
-    next_move = upcoming[0]
-    dt_ms = max(0, next_move.start_ms - game_ts_ms)
-    draw_text_shadow(frame_bgr, f"Next: {next_move.name}  in {dt_ms/1000:.2f}s",
-                     (x0+pad, y+line_h), scale=0.75, color=(60,240,120))
-
-    # Progress bar: 0 at 3s out → full at 0s
-    BAR_MAX_MS = 3000
-    frac = 1.0 - min(1.0, dt_ms / BAR_MAX_MS)
-    bar_x = x0+pad
-    bar_y = y + line_h + 8
-    bar_w = panel_w - 2*pad
-    bar_h_px = 10
-    cv2.rectangle(frame_bgr, (bar_x, bar_y), (bar_x+bar_w, bar_y+bar_h_px), (80,80,80), 1, cv2.LINE_AA)
-    cv2.rectangle(frame_bgr, (bar_x+1, bar_y+1), (bar_x+1+int((bar_w-2)*frac), bar_y+bar_h_px-1), (60,240,120), -1, cv2.LINE_AA)
-
-    # Tiny ghost of the upcoming pose, using JSON pose.norm_xy
-    ghost_top = bar_y + bar_h_px + 8
-    ghost_left = x0 + pad
-    ghost_w = panel_w - 2*pad
-    ghost_h = 110  # set above
-    norm_xy = None
-    try:
-        norm_xy = (next_move.raw.get("pose", {}) or {}).get("norm_xy", None)
-    except Exception:
-        norm_xy = None
-    if norm_xy:
-        draw_norm_xy_pose_scaled(
-            frame_bgr,
-            norm_xy_dict=norm_xy,
-            top_left=(ghost_left, ghost_top),
-            size=(ghost_w, ghost_h),
-            kp_color=(255, 200, 0),     # gold-ish
-            bone_color=(220, 220, 220),
-            radius=2,
-            thickness=1
-        )
-
-    # The rest of the upcoming list
-    y2 = ghost_top + ghost_h + 12
-    for m in upcoming[1:]:
-        d = max(0, m.start_ms - game_ts_ms)
-        draw_text_shadow(frame_bgr, f"{m.name}  in {d/1000:.2f}s", (x0+pad, y2), scale=0.7, color=(220,220,220))
-        y2 += line_h
-
-# ---------- Carousel helpers ----------
+# ---------- Carousel/ghost helpers (used for left list) ----------
 def _render_ghost_from_norm_xy(norm_xy, size=(96, 120)):
     """
-    Render a tiny stick-figure image from pose.norm_xy onto a transparent BGR image.
-    Returns a BGR image with alpha simulated via black background (we composite onto panel later).
+    Render a tiny stick-figure image from pose.norm_xy onto a BGR image.
     """
     w, h = size
     canvas = np.zeros((h, w, 3), dtype=np.uint8)
@@ -318,91 +249,240 @@ def build_ghost_cache(moves, ghost_size=(96, 120)):
 def _truncate(text, max_chars):
     return (text[:max_chars-1] + "…") if len(text) > max_chars else text
 
-def draw_next_moves_carousel(frame_bgr, moves, game_ts_ms, ghost_cache,
-                             max_cards=4, bar_window_ms=3000):
+# ---------- NEW LAYOUT HELPERS ----------
+def find_current_and_upcoming(moves, game_ts_ms, max_upcoming=4):
     """
-    Bottom-center carousel of upcoming moves with mini ghosts and per-card countdown bars.
-    Highlights the first/next move.
+    Returns:
+      current_move: the move whose start_ms is the latest <= game_ts_ms,
+      upcoming: next max_upcoming moves after current_move
     """
-    H, W = frame_bgr.shape[:2]
-    pad_v = 10
-    card_w, card_h = 140, 170
-    gap = 10
-    total_w = max_cards * card_w + (max_cards - 1) * gap
-    x0 = (W - total_w) // 2
-    y0 = H - (card_h + pad_v + 10)  # leave a little margin from bottom
+    if not moves:
+        return None, []
+    past = [m for m in moves if m.start_ms <= game_ts_ms]
+    if past:
+        current = max(past, key=lambda m: m.start_ms)
+        after = [m for m in moves if m.start_ms > current.start_ms]
+    else:
+        current = moves[0]
+        after = moves[1:]
+    return current, after[:max_upcoming]
 
-    # Take next few upcoming
-    upcoming = [m for m in moves if m.start_ms >= game_ts_ms][:max_cards]
+def scale_norm_xy(norm_xy_dict, zoom=1.2):
+    """Scale normalized [0..1] coords around centroid; clamp to [0,1]."""
+    if not norm_xy_dict:
+        return norm_xy_dict
+    xs, ys = zip(*norm_xy_dict.values())
+    cx, cy = sum(xs)/len(xs), sum(ys)/len(ys)
+    out = {}
+    for k, (nx, ny) in norm_xy_dict.items():
+        sx = cx + (nx - cx) * zoom
+        sy = cy + (ny - cy) * zoom
+        out[k] = (min(1.0, max(0.0, sx)), min(1.0, max(0.0, sy)))
+    return out
+
+def draw_current_json_pose_center(frame_bgr, current_move):
+    """
+    Center-pane large target pose from JSON (pose.norm_xy).
+    """
+    if current_move is None:
+        return
+    H, W = frame_bgr.shape[:2]
+
+    # Big centered box
+    box_w = int(W)
+    box_h = int(H)
+    x0 = (W - box_w) // 2
+    y0 = (H - box_h) // 2
+
+    # Panel bg
+    overlay = frame_bgr.copy()
+    cv2.rectangle(overlay, (x0-8, y0-8), (x0+box_w+8, y0+box_h+8), (25,25,25), -1)
+    frame_bgr[:] = cv2.addWeighted(overlay, 0.35, frame_bgr, 0.65, 0)
+
+    # Title
+    draw_text_shadow(frame_bgr, f"NOW: {current_move.name}", (x0, y0-14),
+                     scale=0.8, color=(60, 240, 120), thickness=2)
+
+    norm_xy = None
+    try:
+        norm_xy = (current_move.raw.get("pose", {}) or {}).get("norm_xy", None)
+    except Exception:
+        norm_xy = None
+
+    if norm_xy:
+        norm_xy = scale_norm_xy(norm_xy, zoom=CURRENT_POSE_ZOOM)
+
+        draw_norm_xy_pose_fit(
+            frame_bgr, norm_xy_dict=norm_xy, top_left=(x0, y0), size=(box_w, box_h),
+            target_aspect=CHOREO_ASPECT,
+            kp_color=(255, 200, 0), bone_color=(230, 230, 230), radius=4, thickness=3
+        )
+
+    else:
+        draw_text_shadow(frame_bgr, "(no pose data in JSON)", (x0, y0+24),
+                         scale=0.7, color=(200,200,200), thickness=2)
+
+def draw_upcoming_right_list(frame_bgr, upcoming, game_ts_ms, ghost_cache, max_items=4):
+    """
+    Right-side vertical list of the next N moves.
+    Pose-only cards (no text). Top card gets a 'NEXT' tag (top-right).
+    Designed for a white background.
+    """
     if not upcoming:
         return
 
-    # Panel underlay
-    panel_pad = 8
-    panel_rect = (x0 - panel_pad, y0 - panel_pad,
-                  total_w + 2*panel_pad, card_h + 2*panel_pad)
-    overlay = frame_bgr.copy()
-    cv2.rectangle(overlay,
-                  (panel_rect[0], panel_rect[1]),
-                  (panel_rect[0]+panel_rect[2], panel_rect[1]+panel_rect[3]),
-                  (25, 25, 25), -1)
-    frame_bgr[:] = cv2.addWeighted(overlay, 0.35, frame_bgr, 0.65, 0)
+    H, W = frame_bgr.shape[:2]
+    pad = 12
+    item_w, item_h = 220, 140   # a bit taller since no text
+    x = W - item_w - 16          # right edge
+    y = 60
 
-    for i, m in enumerate(upcoming):
-        cx = x0 + i * (card_w + gap)
-        cy = y0
+    for i, m in enumerate(upcoming[:max_items]):
+        iy = y + i*(item_h + pad)
 
-        # Card background
-        is_next = (i == 0)
-        bg_col = (42, 42, 42) if is_next else (35, 35, 35)
-        border_col = (80, 240, 160) if is_next else (85, 85, 85)
-        cv2.rectangle(frame_bgr, (cx, cy), (cx+card_w, cy+card_h), bg_col, -1, cv2.LINE_AA)
-        cv2.rectangle(frame_bgr, (cx, cy), (cx+card_w, cy+card_h), border_col, 2, cv2.LINE_AA)
+        # Card (white) with soft shadow/border
+        bg = (255, 255, 255)
+        border = (140, 140, 140) if i != 0 else (60, 180, 120)  # emphasize first card border
+        cv2.rectangle(frame_bgr, (x, iy), (x+item_w, iy+item_h), bg, -1, cv2.LINE_AA)
+        cv2.rectangle(frame_bgr, (x, iy), (x+item_w, iy+item_h), border, 2, cv2.LINE_AA)
 
-        # Ghost
-        ghost = ghost_cache.get(m.start_ms)
-        if ghost is not None:
-            gh, gw = ghost.shape[:2]
-            # center horizontally, place near top
-            gx = cx + (card_w - gw) // 2
-            gy = cy + 8
-            # paste (simple copy; both are BGR)
-            frame_bgr[gy:gy+gh, gx:gx+gw] = cv2.addWeighted(
-                frame_bgr[gy:gy+gh, gx:gx+gw], 0.0, ghost, 1.0, 0.0
-            )
+        # Center the ghost in the card
+        # Draw pose directly with aspect-preserving fit (no raster stretch)
+        norm_xy = None
+        try:
+            norm_xy = (m.raw.get("pose", {}) or {}).get("norm_xy", None)
+        except Exception:
+            norm_xy = None
 
-        # Name (trim)
-        name = _truncate(m.name, 16)
-        draw_text_shadow(frame_bgr, name, (cx+8, cy + card_h - 48),
-                         scale=0.55, color=(230, 230, 230), thickness=1)
+        # Apply zoom if we have a pose
+        if norm_xy:
+            norm_xy = scale_norm_xy(norm_xy, zoom=UPCOMING_POSE_ZOOM)
 
-        # Countdown + small clock icon feel
-        dt_ms = max(0, m.start_ms - game_ts_ms)
-        t_txt = f"in {dt_ms/1000:.2f}s"
-        draw_text_shadow(frame_bgr, t_txt, (cx+8, cy + card_h - 28),
-                         scale=0.5, color=(200, 220, 255), thickness=1)
+        inner_pad = 12
+        draw_box_top_left = (x + inner_pad, iy + inner_pad)
+        draw_box_size = (item_w - 2*inner_pad, item_h - 2*inner_pad)
 
-        # Progress bar for THIS move: 0 at bar_window_ms out → full at 0
-        frac = 1.0 - min(1.0, dt_ms / float(bar_window_ms))
-        pb_x, pb_y = cx+8, cy + card_h - 14
-        pb_w, pb_h = card_w - 16, 8
-        cv2.rectangle(frame_bgr, (pb_x, pb_y), (pb_x+pb_w, pb_y+pb_h), (70, 70, 70), 1, cv2.LINE_AA)
-        fill_w = int((pb_w-2) * frac)
-        cv2.rectangle(frame_bgr, (pb_x+1, pb_y+1), (pb_x+1+fill_w, pb_y+pb_h-1),
-                      (60, 240, 120) if is_next else (140, 180, 255), -1, cv2.LINE_AA)
-
-        # "NEXT" tag
-        if is_next:
-            tag_w, tag_h = 44, 16
-            tx = cx + card_w - tag_w - 8  # right-aligned inside card
-            ty = cy + 8                   # a little down from the top
-            cv2.rectangle(frame_bgr, (tx, ty), (tx+tag_w, ty+tag_h),
-                          (60, 240, 120), -1, cv2.LINE_AA)
-            cv2.putText(frame_bgr, "NEXT", (tx+6, ty+12),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (20, 50, 20), 2, cv2.LINE_AA)
+        draw_norm_xy_pose_fit(
+            frame_bgr,
+            norm_xy_dict=norm_xy,
+            top_left=draw_box_top_left,
+            size=draw_box_size,
+            target_aspect=CHOREO_ASPECT,
+            kp_color=(255, 200, 0),
+            bone_color=(180, 180, 180),
+            radius=2,
+            thickness=1
+        )
 
 
+        # “NEXT” tag on the very first card (top-right)
+        if i == 0:
+            tag_w, tag_h = 48, 18
+            tx = x + item_w - tag_w - 8
+            ty = iy + 8
+            cv2.rectangle(frame_bgr, (tx, ty), (tx+tag_w, ty+tag_h), (60, 180, 120), -1, cv2.LINE_AA)
+            cv2.putText(frame_bgr, "NEXT", (tx+6, ty+13),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
+
+def draw_pip_live_skeleton(base_canvas_bgr, live_frame_bgr):
+    """
+    Bottom-left PiP of the *already-annotated* live camera view.
+    """
+    H, W = base_canvas_bgr.shape[:2]
+    pip_w = int(W * 0.28)        # ~28% width
+    pip_h = int(pip_w * 9/16)    # keep 16:9
+    x = 16
+    y = H - pip_h - 16
+
+    # Background panel
+    overlay = base_canvas_bgr.copy()
+    cv2.rectangle(overlay, (x-8, y-8), (x+pip_w+8, y+pip_h+8), (25,25,25), -1)
+    base_canvas_bgr[:] = cv2.addWeighted(overlay, 0.35, base_canvas_bgr, 0.65, 0)
+
+    # Resize and paste
+    pip = cv2.resize(live_frame_bgr, (pip_w, pip_h), interpolation=cv2.INTER_AREA)
+    base_canvas_bgr[y:y+pip_h, x:x+pip_w] = pip
+
+    draw_text_shadow(base_canvas_bgr, "LIVE", (x, y-10),
+                     scale=0.6, color=(255, 200, 0), thickness=2)
+    
+# Assume your choreography poses were authored against a 16:9 frame.
+# If your JSON poses were normalized against a square, change to 1.0.
+CHOREO_ASPECT = 16.0 / 9.0  # width / height
+
+def _fit_rect(container_w, container_h, target_aspect):
+    """
+    Return (x_off, y_off, draw_w, draw_h) that fits a target aspect inside container,
+    centered, with letter/pillar boxing (no stretch).
+    """
+    cont_aspect = container_w / float(container_h)
+    if cont_aspect > target_aspect:
+        # container is wider -> pillarbox
+        draw_h = container_h
+        draw_w = int(round(draw_h * target_aspect))
+        x_off = (container_w - draw_w) // 2
+        y_off = 0
+    else:
+        # container is taller -> letterbox
+        draw_w = container_w
+        draw_h = int(round(draw_w / target_aspect))
+        x_off = 0
+        y_off = (container_h - draw_h) // 2
+    return x_off, y_off, draw_w, draw_h
+
+def draw_norm_xy_pose_fit(frame_bgr, norm_xy_dict, top_left, size,
+                          target_aspect=CHOREO_ASPECT,
+                          kp_color=(255, 200, 0), bone_color=(220, 220, 220),
+                          radius=2, thickness=1):
+    """
+    Aspect-preserving renderer: draws pose into a letterboxed sub-rect
+    inside `size`, so the skeleton isn't squished.
+    """
+    if not norm_xy_dict:
+        return
+    x0, y0 = top_left
+    box_w, box_h = size
+
+    # Compute aspect-preserving draw area INSIDE the provided box
+    off_x, off_y, draw_w, draw_h = _fit_rect(box_w, box_h, target_aspect)
+    base_x = x0 + off_x
+    base_y = y0 + off_y
+
+    # Map norm coords (0..1) into the fitted draw rect
+    pts = {}
+    for k, (nx, ny) in norm_xy_dict.items():
+        try:
+            idx = int(k)
+        except Exception:
+            continue
+        px = int(base_x + nx * draw_w)
+        py = int(base_y + ny * draw_h)
+        pts[idx] = (px, py)
+
+    # Bones
+    for a, b in POSE_CONNECTIONS:
+        if a in pts and b in pts:
+            cv2.line(frame_bgr, pts[a], pts[b], bone_color, thickness, cv2.LINE_AA)
+    # Keypoints
+    for (px, py) in pts.values():
+        cv2.circle(frame_bgr, (px, py), radius, kp_color, -1, lineType=cv2.LINE_AA)
+
+def draw_points_hud(img, points, pos=(10, 38)):
+    draw_text_shadow(img, f"Score: {int(points)}", pos, scale=1.0, color=(255,255,255), thickness=2)
+
+def draw_tier_banner(img, tier, score, move_name, y_px=120):
+    t = (tier or "miss").lower()
+    color = TIER_COLORS.get(t, (255,255,255))
+    text = f"{t.upper()}  +{int(score)}"
+    H, W = img.shape[:2]
+    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
+    x = max(12, (W - text_size[0]) // 2)
+    draw_text_shadow(img, text, (x, y_px), scale=1.2, color=color, thickness=3)
+
+
+
+# ---------- Main ----------
 def main():
     # Webcam init
     cap = cv2.VideoCapture(0)
@@ -430,6 +510,7 @@ def main():
     )
 
     last_move_feedback = None  # (tier, score, name, show_until_ms)
+    total_points = 0
 
     # MediaPipe Pose
     options = PoseLandmarkerOptions(
@@ -464,34 +545,19 @@ def main():
                 mp_ts_ms += 33
                 result = landmarker.detect_for_video(mp_image, mp_ts_ms)
 
-                # Draw live skeleton if present
-                if result and result.pose_landmarks:
-                    draw_landmarks(frame_bgr, result.pose_landmarks[0])
-                    cv2.putText(frame_bgr, "BlazePose (Full) — VIDEO mode", (10, 24),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, TEXT_COLOR, 2, cv2.LINE_AA)
-
                 # --- Update GAME clock based on state ---
                 if state == "idle":
-                    # show instructions + first move info
-                    draw_idle_overlay(frame_bgr, moves, WINDOW_HALF_MS)
-
+                    pass  # idle overlay drawn later on canvas
                 elif state == "countdown":
-                    # count down in real time
                     ms_left = int((countdown_deadline - time.monotonic()) * 1000)
                     if ms_left <= 0:
                         state = "running"
                         running_zero_monotonic = time.monotonic()
                         game_ts_ms = 0
-                    else:
-                        draw_countdown_overlay(frame_bgr, ms_left)
-
                 elif state == "running":
-                    # set game ts from real time since start
                     game_ts_ms = int((time.monotonic() - running_zero_monotonic) * 1000)
-
                 elif state == "paused":
-                    # game_ts_ms frozen; show pause label
-                    draw_text_shadow(frame_bgr, "PAUSED", (10, 52), scale=0.9, color=(200, 200, 80))
+                    pass  # paused label drawn later
 
                 # --- JSON scoring only when running ---
                 live_emb = None
@@ -510,30 +576,82 @@ def main():
                     # Any moves that just finalized?
                     for res in finalized:
                         print(f"[json] Move {res.name} @ {res.start_ms} ms → {res.tier.upper()} "
-                              f"({res.best_score:.1f}) | best frame ts: {res.best_ts_ms}")
-                        # show on-screen feedback for ~1 second
+                            f"({res.best_score:.1f}) | best frame ts: {res.best_ts_ms}")
+
+                        # Points accumulate
+                        tier_lower = (res.tier or "").lower()
+                        gained = 0 if tier_lower == "miss" else max(0, int(round(res.best_score)))
+                        total_points += gained
+
+                        # Store banner state for ~1 second
                         last_move_feedback = (res.tier, res.best_score, res.name, game_ts_ms + 1000)
 
-                # HUD for last finalized move
+
+
+
+                # ---------- Build our new layout ----------
+                H, W = frame_bgr.shape[:2]
+
+                # 1) Prepare a live view with landmarks (annotate on a copy)
+                live_view = frame_bgr.copy()
+                if result and result.pose_landmarks:
+                    draw_landmarks(live_view, result.pose_landmarks[0])
+                    cv2.putText(live_view, "BlazePose (Full) — VIDEO mode", (10, 24),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, TEXT_COLOR, 2, cv2.LINE_AA)
+
+                # 2) Fresh canvas for the composed scene
+                canvas = np.zeros_like(frame_bgr)
+
+                # 3) State overlays
+                if state == "idle":
+                    draw_idle_overlay(canvas, moves, WINDOW_HALF_MS)
+                elif state == "countdown":
+                    ms_left = int((countdown_deadline - time.monotonic()) * 1000)
+                    if ms_left > 0:
+                        draw_countdown_overlay(canvas, ms_left)
+                elif state == "paused":
+                    draw_text_shadow(canvas, "PAUSED", (10, 52), scale=0.9, color=(200, 200, 80))
+
+                # 4) Last-move feedback (big banner) + score HUD
                 if last_move_feedback is not None:
                     tier_txt, tier_score, move_name, show_until = last_move_feedback
-                    if game_ts_ms <= show_until:
-                        txt = f"Move {move_name}: {tier_txt.upper()} ({tier_score:.0f})"
-                        cv2.putText(frame_bgr, txt, (10, 86),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (60, 240, 120), 2, cv2.LINE_AA)
-                    else:
+                    if state in ("running", "paused") and game_ts_ms <= show_until:
+                        txt = f"{tier_txt.upper()}  +{int(tier_score)}"
+                        cv2.putText(canvas, txt, (10, 66),   # directly under the score
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, TIER_COLORS.get(tier_txt.lower(), (255,255,255)), 2, cv2.LINE_AA)
+                    elif state in ("running", "paused") and game_ts_ms > show_until:
                         last_move_feedback = None
 
-                # Upcoming overlay (works in running/paused; in idle it will show "No more" until start)
-                if moves and state in ("running", "paused"):
-                    draw_upcoming_overlay(frame_bgr, moves, game_ts_ms, max_items=6)
-                    draw_next_moves_carousel(frame_bgr, moves, game_ts_ms, ghost_cache,
-                                             max_cards=4, bar_window_ms=3000)
+                # Always-on score HUD (top-left)
+                draw_points_hud(canvas, total_points, pos=(10, 38))
 
-                # Controls overlay (always)
-                draw_text_shadow(frame_bgr, INSTRUCTIONS, (10, frame_bgr.shape[0]-12), scale=0.6, color=(200,200,200))
 
+                # 5) Center: large target pose for current beat (or first in idle)
+                current_move, upcoming = (None, [])
+                if moves:
+                    if state in ("running", "paused"):
+                        current_move, upcoming = find_current_and_upcoming(moves, game_ts_ms, max_upcoming=4)
+                    else:
+                        current_move = moves[0]
+                        upcoming = moves[1:5]
+
+                draw_current_json_pose_center(canvas, current_move)
+
+                # 6) Left: vertical upcoming list (next 4)
+                draw_upcoming_right_list(canvas, upcoming, game_ts_ms, ghost_cache, max_items=4)
+
+                # 7) Bottom-left: PiP live camera with skeleton
+                draw_pip_live_skeleton(canvas, live_view)
+
+                # 8) Controls overlay (always)
+                draw_text_shadow(canvas, INSTRUCTIONS, (10, canvas.shape[0]-12),
+                                 scale=0.6, color=(200,200,200))
+
+                # 9) Present
+                frame_bgr = canvas
                 cv2.imshow("BlazePose Webcam", frame_bgr)
+
+                # --- input handling ---
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
                     break
@@ -546,6 +664,7 @@ def main():
                         scorer = ScoringEngine(moves=moves, window_half_ms=WINDOW_HALF_MS,
                                                thresholds=TIER_THRESHOLDS, tie_breaker="closest")
                         last_move_feedback = None
+                        total_points = 0
                         state = "countdown"
                         countdown_deadline = time.monotonic() + START_COUNTDOWN_MS / 1000.0
                 elif key == ord('p'):
@@ -560,6 +679,7 @@ def main():
                     scorer = ScoringEngine(moves=moves, window_half_ms=WINDOW_HALF_MS,
                                            thresholds=TIER_THRESHOLDS, tie_breaker="closest")
                     last_move_feedback = None
+                    total_points = 0
                     state = "idle"
                     game_ts_ms = 0
                     countdown_deadline = None
