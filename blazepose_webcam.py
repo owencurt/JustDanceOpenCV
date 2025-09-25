@@ -399,7 +399,7 @@ def draw_upcoming_right_list(frame_bgr, upcoming, game_ts_ms, ghost_cache, max_i
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
 
-def draw_pip_live_skeleton(base_canvas_bgr, live_frame_bgr):
+def draw_pip_live_skeleton(base_canvas_bgr, live_frame_bgr, mirror=True):
     """
     Bottom-left PiP of the *already-annotated* live camera view.
     """
@@ -416,6 +416,10 @@ def draw_pip_live_skeleton(base_canvas_bgr, live_frame_bgr):
 
     # Resize and paste
     pip = cv2.resize(live_frame_bgr, (pip_w, pip_h), interpolation=cv2.INTER_AREA)
+
+    if mirror:
+        pip = cv2.flip(pip, 1)
+
     base_canvas_bgr[y:y+pip_h, x:x+pip_w] = pip
 
     draw_text_shadow(base_canvas_bgr, "LIVE", (x, y-10),
@@ -651,16 +655,17 @@ def main():
                         print(f"[json] Move {res.name} @ {res.start_ms} ms → {res.tier.upper()} "
                             f"({res.best_score:.1f}) | best frame ts: {res.best_ts_ms}")
 
-                        # Points accumulate
                         tier_lower = (res.tier or "").lower()
-                        gained = 0 if tier_lower == "miss" else max(0, int(round(res.best_score)))
-                        total_points += gained
 
-                        # Store banner state for ~1 second
-                        last_move_feedback = (res.tier, res.best_score, res.name, game_ts_ms + 1000)
-
-
-
+                        # Only award points and show banner if NOT a miss
+                        if tier_lower != "miss":
+                            gained = max(0, int(round(res.best_score)))
+                            total_points += gained
+                            # show banner for ~1s
+                            last_move_feedback = (res.tier, res.best_score, res.name, game_ts_ms + 1000)
+                        else:
+                            # miss → no points, no banner
+                            pass
 
                 # ---------- Build our new layout ----------
                 H, W = frame_bgr.shape[:2]
