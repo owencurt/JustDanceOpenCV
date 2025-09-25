@@ -16,7 +16,7 @@ PoseLandmarker = mp.tasks.vision.PoseLandmarker
 PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
 
 # --- Config: JSON choreo + scoring window + thresholds ---
-CHOREO_JSON_PATH = "charts/test.json"     # <-- set this to your JSON file
+CHOREO_JSON_PATH = "charts/ymca.json"     # <-- set this to your JSON file
 WINDOW_HALF_MS = 150                      # default ±250ms; tweak as desired
 TIER_THRESHOLDS = DEFAULT_THRESHOLDS      # or override: {"perfect": 90, "great": 78, ...}
 
@@ -265,6 +265,143 @@ def draw_upcoming_overlay(frame_bgr, moves, game_ts_ms, max_items=6):
         draw_text_shadow(frame_bgr, f"{m.name}  in {d/1000:.2f}s", (x0+pad, y2), scale=0.7, color=(220,220,220))
         y2 += line_h
 
+# ---------- Carousel helpers ----------
+def _render_ghost_from_norm_xy(norm_xy, size=(96, 120)):
+    """
+    Render a tiny stick-figure image from pose.norm_xy onto a transparent BGR image.
+    Returns a BGR image with alpha simulated via black background (we composite onto panel later).
+    """
+    w, h = size
+    canvas = np.zeros((h, w, 3), dtype=np.uint8)
+    if not norm_xy:
+        return canvas
+
+    # Convert to px inside this mini-canvas with a small margin
+    margin = 6
+    box_w = w - 2*margin
+    box_h = h - 2*margin
+    pts = {}
+    for k, (nx, ny) in norm_xy.items():
+        try:
+            idx = int(k)
+        except Exception:
+            continue
+        px = int(margin + nx * box_w)
+        py = int(margin + ny * box_h)
+        pts[idx] = (px, py)
+
+    # Bones
+    for a, b in POSE_CONNECTIONS:
+        if a in pts and b in pts:
+            cv2.line(canvas, pts[a], pts[b], (220, 220, 220), 1, cv2.LINE_AA)
+    # Keypoints
+    for (px, py) in pts.values():
+        cv2.circle(canvas, (px, py), 2, (255, 200, 0), -1, lineType=cv2.LINE_AA)
+
+    return canvas
+
+def build_ghost_cache(moves, ghost_size=(96, 120)):
+    """
+    Pre-render per-move ghosts once to avoid per-frame work.
+    Keyed by move.start_ms (or any unique field).
+    """
+    cache = {}
+    for m in moves:
+        norm_xy = None
+        try:
+            norm_xy = (m.raw.get("pose", {}) or {}).get("norm_xy", None)
+        except Exception:
+            pass
+        cache[m.start_ms] = _render_ghost_from_norm_xy(norm_xy, ghost_size)
+    return cache
+
+def _truncate(text, max_chars):
+    return (text[:max_chars-1] + "…") if len(text) > max_chars else text
+
+def draw_next_moves_carousel(frame_bgr, moves, game_ts_ms, ghost_cache,
+                             max_cards=4, bar_window_ms=3000):
+    """
+    Bottom-center carousel of upcoming moves with mini ghosts and per-card countdown bars.
+    Highlights the first/next move.
+    """
+    H, W = frame_bgr.shape[:2]
+    pad_v = 10
+    card_w, card_h = 140, 170
+    gap = 10
+    total_w = max_cards * card_w + (max_cards - 1) * gap
+    x0 = (W - total_w) // 2
+    y0 = H - (card_h + pad_v + 10)  # leave a little margin from bottom
+
+    # Take next few upcoming
+    upcoming = [m for m in moves if m.start_ms >= game_ts_ms][:max_cards]
+    if not upcoming:
+        return
+
+    # Panel underlay
+    panel_pad = 8
+    panel_rect = (x0 - panel_pad, y0 - panel_pad,
+                  total_w + 2*panel_pad, card_h + 2*panel_pad)
+    overlay = frame_bgr.copy()
+    cv2.rectangle(overlay,
+                  (panel_rect[0], panel_rect[1]),
+                  (panel_rect[0]+panel_rect[2], panel_rect[1]+panel_rect[3]),
+                  (25, 25, 25), -1)
+    frame_bgr[:] = cv2.addWeighted(overlay, 0.35, frame_bgr, 0.65, 0)
+
+    for i, m in enumerate(upcoming):
+        cx = x0 + i * (card_w + gap)
+        cy = y0
+
+        # Card background
+        is_next = (i == 0)
+        bg_col = (42, 42, 42) if is_next else (35, 35, 35)
+        border_col = (80, 240, 160) if is_next else (85, 85, 85)
+        cv2.rectangle(frame_bgr, (cx, cy), (cx+card_w, cy+card_h), bg_col, -1, cv2.LINE_AA)
+        cv2.rectangle(frame_bgr, (cx, cy), (cx+card_w, cy+card_h), border_col, 2, cv2.LINE_AA)
+
+        # Ghost
+        ghost = ghost_cache.get(m.start_ms)
+        if ghost is not None:
+            gh, gw = ghost.shape[:2]
+            # center horizontally, place near top
+            gx = cx + (card_w - gw) // 2
+            gy = cy + 8
+            # paste (simple copy; both are BGR)
+            frame_bgr[gy:gy+gh, gx:gx+gw] = cv2.addWeighted(
+                frame_bgr[gy:gy+gh, gx:gx+gw], 0.0, ghost, 1.0, 0.0
+            )
+
+        # Name (trim)
+        name = _truncate(m.name, 16)
+        draw_text_shadow(frame_bgr, name, (cx+8, cy + card_h - 48),
+                         scale=0.55, color=(230, 230, 230), thickness=1)
+
+        # Countdown + small clock icon feel
+        dt_ms = max(0, m.start_ms - game_ts_ms)
+        t_txt = f"in {dt_ms/1000:.2f}s"
+        draw_text_shadow(frame_bgr, t_txt, (cx+8, cy + card_h - 28),
+                         scale=0.5, color=(200, 220, 255), thickness=1)
+
+        # Progress bar for THIS move: 0 at bar_window_ms out → full at 0
+        frac = 1.0 - min(1.0, dt_ms / float(bar_window_ms))
+        pb_x, pb_y = cx+8, cy + card_h - 14
+        pb_w, pb_h = card_w - 16, 8
+        cv2.rectangle(frame_bgr, (pb_x, pb_y), (pb_x+pb_w, pb_y+pb_h), (70, 70, 70), 1, cv2.LINE_AA)
+        fill_w = int((pb_w-2) * frac)
+        cv2.rectangle(frame_bgr, (pb_x+1, pb_y+1), (pb_x+1+fill_w, pb_y+pb_h-1),
+                      (60, 240, 120) if is_next else (140, 180, 255), -1, cv2.LINE_AA)
+
+        # "NEXT" tag
+        if is_next:
+            tag_w, tag_h = 44, 16
+            tx = cx + card_w - tag_w - 8  # right-aligned inside card
+            ty = cy + 8                   # a little down from the top
+            cv2.rectangle(frame_bgr, (tx, ty), (tx+tag_w, ty+tag_h),
+                          (60, 240, 120), -1, cv2.LINE_AA)
+            cv2.putText(frame_bgr, "NEXT", (tx+6, ty+12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (20, 50, 20), 2, cv2.LINE_AA)
+
+
 
 def main():
     # Webcam init
@@ -282,6 +419,7 @@ def main():
     except Exception as e:
         print(f"[!] Could not load choreography: {e}")
         moves = []
+    ghost_cache = build_ghost_cache(moves, ghost_size=(96, 120))
 
     # Create scoring engine (JSON-based)
     scorer = ScoringEngine(
@@ -389,6 +527,8 @@ def main():
                 # Upcoming overlay (works in running/paused; in idle it will show "No more" until start)
                 if moves and state in ("running", "paused"):
                     draw_upcoming_overlay(frame_bgr, moves, game_ts_ms, max_items=6)
+                    draw_next_moves_carousel(frame_bgr, moves, game_ts_ms, ghost_cache,
+                                             max_cards=4, bar_window_ms=3000)
 
                 # Controls overlay (always)
                 draw_text_shadow(frame_bgr, INSTRUCTIONS, (10, frame_bgr.shape[0]-12), scale=0.6, color=(200,200,200))
