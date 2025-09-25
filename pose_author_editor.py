@@ -411,7 +411,7 @@ class MainWindow(QtWidgets.QMainWindow):
         form = QtWidgets.QFormLayout(panel)
 
         self.title_edit = QtWidgets.QLineEdit("My Dance")
-        self.bpm_spin = QtWidgets.QDoubleSpinBox(); self.bpm_spin.setRange(30.0, 240.0); self.bpm_spin.setValue(DEFAULT_BPM)
+        self.bpm_spin = QtWidgets.QDoubleSpinBox(); self.bpm_spin.setRange(1.0, 10000.0); self.bpm_spin.setValue(DEFAULT_BPM)
         self.offset_spin = QtWidgets.QSpinBox(); self.offset_spin.setRange(0, 100000); self.offset_spin.setValue(DEFAULT_OFFSET_MS)
         self.grid_chk = QtWidgets.QCheckBox("Show beat flash"); self.grid_chk.setChecked(True)
         self.grid_chk.toggled.connect(lambda v: setattr(self.canvas, "show_grid", v))

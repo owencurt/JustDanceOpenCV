@@ -16,13 +16,13 @@ PoseLandmarker = mp.tasks.vision.PoseLandmarker
 PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
 
 # --- Config: JSON choreo + scoring window + thresholds ---
-CHOREO_JSON_PATH = "charts/ymca.json"     # <-- set this to your JSON file
+CHOREO_JSON_PATH = "charts/ymca_extra.json"     # <-- set this to your JSON file
 WINDOW_HALF_MS = 150                      # default ±250ms; tweak as desired
 TIER_THRESHOLDS = DEFAULT_THRESHOLDS      # or override: {"perfect": 90, "great": 78, ...}
 
 # --- Start/Control ---
 START_COUNTDOWN_MS = 3000                 # 3-2-1 before the timer starts
-INSTRUCTIONS = "SPACE to start • P to pause/resume • R to reset • Q to quit"
+INSTRUCTIONS = "SPACE to start - P to pause/resume - R to reset - Q to quit"
 
 # --- Drawing params ---
 POSE_CONNECTIONS = mp.solutions.pose.POSE_CONNECTIONS
@@ -63,6 +63,13 @@ TIER_COLORS = {
     "ok":      (240, 180, 80),
     "miss":    (90, 90, 90),
 }
+
+# --- Pose tweening (center target) ---
+SMOOTH_TARGET_ENABLED = False   # ← flip to False to disable
+EASE_MODE = "linear"            # "linear" | "cubic" | "quint"
+CLAMP_TO_INTERVAL = True       # keep alpha in [0,1] strictly per beat interval
+MIN_INTERVAL_MS = 120         # guard: if beat gap is tiny, skip tween to avoid jitter
+
 
 
 def _angle(a, b, c):
@@ -187,15 +194,10 @@ def draw_text_shadow(img, text, org, scale=0.7, color=(255,255,255), thickness=2
 def draw_countdown_overlay(frame_bgr, ms_left):
     secs = max(0, int((ms_left + 999) // 1000))
     text = f"Starting in {secs}..."
-    draw_text_shadow(frame_bgr, text, (10, 52), scale=0.9, color=(60, 240, 120), thickness=2)
+    draw_text_shadow(frame_bgr, text, (10, 75), scale=0.9, color=(60, 240, 120), thickness=2)
 
 def draw_idle_overlay(frame_bgr, moves, window_half_ms):
-    draw_text_shadow(frame_bgr, "Ready.", (10, 28), scale=0.9, color=(200, 200, 255))
-    draw_text_shadow(frame_bgr, INSTRUCTIONS, (10, 56), scale=0.7, color=(200, 200, 200))
-    if moves:
-        first = moves[0]
-        draw_text_shadow(frame_bgr, f"First move '{first.name}' at {first.start_ms} ms (window ±{window_half_ms} ms)",
-                         (10, 84), scale=0.7, color=(200, 200, 200))
+    draw_text_shadow(frame_bgr, "Ready.", (10, 75), scale=0.9, color=(200, 200, 255))
 
 # ---------- Carousel/ghost helpers (used for left list) ----------
 def _render_ghost_from_norm_xy(norm_xy, size=(96, 120)):
@@ -280,47 +282,58 @@ def scale_norm_xy(norm_xy_dict, zoom=1.2):
         out[k] = (min(1.0, max(0.0, sx)), min(1.0, max(0.0, sy)))
     return out
 
-def draw_current_json_pose_center(frame_bgr, current_move):
+def draw_current_json_pose_center(frame_bgr, current_move, next_move=None, game_ts_ms=None):
     """
-    Center-pane large target pose from JSON (pose.norm_xy).
+    Center-pane large target pose from JSON (pose.norm_xy), optionally tweened toward next pose.
     """
     if current_move is None:
         return
     H, W = frame_bgr.shape[:2]
 
-    # Big centered box
+    # Big centered box (uses whole canvas; you can keep your panel overlay if you like)
     box_w = int(W)
     box_h = int(H)
     x0 = (W - box_w) // 2
     y0 = (H - box_h) // 2
 
-    # Panel bg
-    overlay = frame_bgr.copy()
-    cv2.rectangle(overlay, (x0-8, y0-8), (x0+box_w+8, y0+box_h+8), (25,25,25), -1)
-    frame_bgr[:] = cv2.addWeighted(overlay, 0.35, frame_bgr, 0.65, 0)
+    # # Title
+    # draw_text_shadow(frame_bgr, f"NOW: {current_move.name}", (x0 + 12, y0 + 36),
+    #                  scale=0.8, color=(60, 240, 120), thickness=2)
 
-    # Title
-    draw_text_shadow(frame_bgr, f"NOW: {current_move.name}", (x0, y0-14),
-                     scale=0.8, color=(60, 240, 120), thickness=2)
+    # --- pick base and (optionally) blended pose ---
+    norm_xy_a = _get_pose_norm_xy(current_move)
+    norm_xy_draw = norm_xy_a
 
-    norm_xy = None
-    try:
-        norm_xy = (current_move.raw.get("pose", {}) or {}).get("norm_xy", None)
-    except Exception:
-        norm_xy = None
+    if (SMOOTH_TARGET_ENABLED 
+        and game_ts_ms is not None 
+        and next_move is not None 
+        and hasattr(current_move, "start_ms") 
+        and hasattr(next_move, "start_ms")):
 
-    if norm_xy:
-        norm_xy = scale_norm_xy(norm_xy, zoom=CURRENT_POSE_ZOOM)
+        dt = next_move.start_ms - current_move.start_ms
+        if dt >= MIN_INTERVAL_MS:
+            # progress inside [current, next)
+            p = (game_ts_ms - current_move.start_ms) / float(dt)
+            if CLAMP_TO_INTERVAL:
+                p = max(0.0, min(1.0, p))
+            # Ease
+            alpha = _ease(p, EASE_MODE)
 
+            norm_xy_b = _get_pose_norm_xy(next_move)
+            norm_xy_draw = _blend_norm_xy(norm_xy_a, norm_xy_b, alpha)
+
+    if norm_xy_draw:
+        # Optional size zoom, then aspect-preserving draw
+        norm_xy_draw = scale_norm_xy(norm_xy_draw, zoom=CURRENT_POSE_ZOOM)
         draw_norm_xy_pose_fit(
-            frame_bgr, norm_xy_dict=norm_xy, top_left=(x0, y0), size=(box_w, box_h),
+            frame_bgr, norm_xy_dict=norm_xy_draw, top_left=(x0, y0), size=(box_w, box_h),
             target_aspect=CHOREO_ASPECT,
             kp_color=(255, 200, 0), bone_color=(230, 230, 230), radius=4, thickness=3
         )
-
     else:
-        draw_text_shadow(frame_bgr, "(no pose data in JSON)", (x0, y0+24),
+        draw_text_shadow(frame_bgr, "(no pose data in JSON)", (x0+12, y0+64),
                          scale=0.7, color=(200,200,200), thickness=2)
+
 
 def draw_upcoming_right_list(frame_bgr, upcoming, game_ts_ms, ghost_cache, max_items=4):
     """
@@ -480,6 +493,53 @@ def draw_tier_banner(img, tier, score, move_name, y_px=120):
     x = max(12, (W - text_size[0]) // 2)
     draw_text_shadow(img, text, (x, y_px), scale=1.2, color=color, thickness=3)
 
+# --- Pose tweening Helpers ---
+
+def _ease(t, mode="cubic"):
+    """t in [0,1] → eased t."""
+    t = max(0.0, min(1.0, t))
+    if mode == "linear":
+        return t
+    if mode == "quint":  # smoother ends than cubic
+        return 16*t**5 - 40*t**4 + 40*t**3 - 20*t**2 + 5*t
+    # default cubic in-out
+    if t < 0.5:
+        return 4*t*t*t
+    return 1 - pow(-2*t + 2, 3) / 2
+
+def _blend_norm_xy(a, b, alpha):
+    """
+    LERP two norm_xy dicts: {str(idx): [x,y]}, alpha in [0,1].
+    Missing keys fall back to whichever is present.
+    """
+    if a is None and b is None:
+        return None
+    if a is None:
+        return b
+    if b is None:
+        return a
+    out = {}
+    keys = set(a.keys()) | set(b.keys())
+    for k in keys:
+        va = a.get(k)
+        vb = b.get(k)
+        if va is None: 
+            out[k] = vb
+            continue
+        if vb is None:
+            out[k] = va
+            continue
+        ax, ay = va
+        bx, by = vb
+        out[k] = (ax + (bx - ax) * alpha, ay + (by - ay) * alpha)
+    return out
+
+def _get_pose_norm_xy(move):
+    try:
+        return (move.raw.get("pose", {}) or {}).get("norm_xy", None)
+    except Exception:
+        return None
+
 
 
 # ---------- Main ----------
@@ -610,7 +670,7 @@ def main():
                     if ms_left > 0:
                         draw_countdown_overlay(canvas, ms_left)
                 elif state == "paused":
-                    draw_text_shadow(canvas, "PAUSED", (10, 52), scale=0.9, color=(200, 200, 80))
+                    draw_text_shadow(canvas, "PAUSED", (10, 75), scale=0.9, color=(200, 200, 80))
 
                 # 4) Last-move feedback (big banner) + score HUD
                 if last_move_feedback is not None:
@@ -635,7 +695,8 @@ def main():
                         current_move = moves[0]
                         upcoming = moves[1:5]
 
-                draw_current_json_pose_center(canvas, current_move)
+                next_move = upcoming[0] if upcoming else None
+                draw_current_json_pose_center(canvas, current_move, next_move=next_move, game_ts_ms=game_ts_ms)
 
                 # 6) Left: vertical upcoming list (next 4)
                 draw_upcoming_right_list(canvas, upcoming, game_ts_ms, ghost_cache, max_items=4)
@@ -644,8 +705,7 @@ def main():
                 draw_pip_live_skeleton(canvas, live_view)
 
                 # 8) Controls overlay (always)
-                draw_text_shadow(canvas, INSTRUCTIONS, (10, canvas.shape[0]-12),
-                                 scale=0.6, color=(200,200,200))
+                draw_text_shadow(canvas, INSTRUCTIONS, (650, canvas.shape[0] - 12), scale=0.6, color=(200,200,200), thickness=2)
 
                 # 9) Present
                 frame_bgr = canvas
@@ -667,6 +727,7 @@ def main():
                         total_points = 0
                         state = "countdown"
                         countdown_deadline = time.monotonic() + START_COUNTDOWN_MS / 1000.0
+
                 elif key == ord('p'):
                     if state == "running":
                         state = "paused"
@@ -684,6 +745,7 @@ def main():
                     game_ts_ms = 0
                     countdown_deadline = None
                     running_zero_monotonic = None
+
 
         except KeyboardInterrupt:
             print("\n[i] Stopping (Ctrl+C).")

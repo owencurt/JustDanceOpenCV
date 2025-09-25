@@ -14,7 +14,6 @@ SimilarityFn = Callable[[Embedding, Embedding], Tuple[float, SimilarityMeta]]
 # Difficulty / Scoring knobs
 # -------------------------
 
-# Stricter tier bands (hard but fair)
 DEFAULT_THRESHOLDS = {
     "perfect": 94.0,
     "great":   85.0,
