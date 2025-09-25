@@ -17,6 +17,7 @@ PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
 
 # --- Config: JSON choreo + scoring window + thresholds ---
 CHOREO_JSON_PATH = "charts/ymca_extra.json"     # <-- set this to your JSON file
+SCORING_JSON_PATH = "charts/ymca.json"          # ← scoring chart (sparse / keypoints)
 WINDOW_HALF_MS = 150                      # default ±250ms; tweak as desired
 TIER_THRESHOLDS = DEFAULT_THRESHOLDS      # or override: {"perfect": 90, "great": 78, ...}
 
@@ -65,7 +66,7 @@ TIER_COLORS = {
 }
 
 # --- Pose tweening (center target) ---
-SMOOTH_TARGET_ENABLED = False   # ← flip to False to disable
+SMOOTH_TARGET_ENABLED = True   # ← flip to False to disable
 EASE_MODE = "linear"            # "linear" | "cubic" | "quint"
 CLAMP_TO_INTERVAL = True       # keep alpha in [0,1] strictly per beat interval
 MIN_INTERVAL_MS = 120         # guard: if beat gap is tiny, skip tween to avoid jitter
@@ -553,21 +554,33 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
     # Load choreography from JSON
+    # Load two choreographies
     try:
-        moves = load_choreography(CHOREO_JSON_PATH)
-        print(f"[i] Loaded {len(moves)} moves from {CHOREO_JSON_PATH}")
+        scoring_moves = load_choreography(SCORING_JSON_PATH)
+        print(f"[i] Loaded {len(scoring_moves)} moves for SCORING from {SCORING_JSON_PATH}")
     except Exception as e:
-        print(f"[!] Could not load choreography: {e}")
-        moves = []
-    ghost_cache = build_ghost_cache(moves, ghost_size=(96, 120))
+        print(f"[!] Could not load SCORING choreography: {e}")
+        scoring_moves = []
+
+    try:
+        display_moves = load_choreography(CHOREO_JSON_PATH)
+        print(f"[i] Loaded {len(display_moves)} moves for DISPLAY from {CHOREO_JSON_PATH}")
+    except Exception as e:
+        print(f"[!] Could not load DISPLAY choreography: {e}")
+        display_moves = []
+
+    # All drawing caches should use the DISPLAY chart
+    ghost_cache = build_ghost_cache(display_moves, ghost_size=(96, 120))
+
 
     # Create scoring engine (JSON-based)
     scorer = ScoringEngine(
-        moves=moves,
+        moves=scoring_moves,
         window_half_ms=WINDOW_HALF_MS,
         thresholds=TIER_THRESHOLDS,
         tie_breaker="closest"
     )
+
 
     last_move_feedback = None  # (tier, score, name, show_until_ms)
     total_points = 0
@@ -627,9 +640,9 @@ def main():
                     live_pts = landmarks_to_pixels(result.pose_landmarks[0], w, h)
                     live_emb = pose_embedding(live_pts)
 
-                if state == "running" and live_emb is not None and moves:
+                if state == "running" and live_emb is not None and scoring_moves:
                     finalized = scorer.update(
-                        ts_ms=game_ts_ms,        # <-- game clock
+                        ts_ms=game_ts_ms,
                         live_emb=live_emb,
                         similarity_fn=pose_similarity
                     )
@@ -664,7 +677,7 @@ def main():
 
                 # 3) State overlays
                 if state == "idle":
-                    draw_idle_overlay(canvas, moves, WINDOW_HALF_MS)
+                    draw_idle_overlay(canvas, display_moves, WINDOW_HALF_MS)
                 elif state == "countdown":
                     ms_left = int((countdown_deadline - time.monotonic()) * 1000)
                     if ms_left > 0:
@@ -688,12 +701,12 @@ def main():
 
                 # 5) Center: large target pose for current beat (or first in idle)
                 current_move, upcoming = (None, [])
-                if moves:
+                if display_moves:
                     if state in ("running", "paused"):
-                        current_move, upcoming = find_current_and_upcoming(moves, game_ts_ms, max_upcoming=4)
+                        current_move, upcoming = find_current_and_upcoming(display_moves, game_ts_ms, max_upcoming=4)
                     else:
-                        current_move = moves[0]
-                        upcoming = moves[1:5]
+                        current_move = display_moves[0]
+                        upcoming = display_moves[1:5]
 
                 next_move = upcoming[0] if upcoming else None
                 draw_current_json_pose_center(canvas, current_move, next_move=next_move, game_ts_ms=game_ts_ms)
@@ -721,7 +734,7 @@ def main():
                         countdown_deadline = time.monotonic() + START_COUNTDOWN_MS / 1000.0
                     elif state == "running":
                         # restart countdown mid-run: treat as reset+start
-                        scorer = ScoringEngine(moves=moves, window_half_ms=WINDOW_HALF_MS,
+                        scorer = ScoringEngine(moves=scoring_moves, window_half_ms=WINDOW_HALF_MS,
                                                thresholds=TIER_THRESHOLDS, tie_breaker="closest")
                         last_move_feedback = None
                         total_points = 0
@@ -737,7 +750,7 @@ def main():
                         state = "running"
                 elif key == ord('r'):
                     # hard reset
-                    scorer = ScoringEngine(moves=moves, window_half_ms=WINDOW_HALF_MS,
+                    scorer = ScoringEngine(moves=scoring_moves, window_half_ms=WINDOW_HALF_MS,
                                            thresholds=TIER_THRESHOLDS, tie_breaker="closest")
                     last_move_feedback = None
                     total_points = 0
@@ -752,7 +765,7 @@ def main():
         finally:
             cap.release()
             cv2.destroyAllWindows()
-            if moves:
+            if scoring_moves:
                 leftovers = scorer.finalize_all()
                 for res in leftovers:
                     print(f"[finalize] {res.name} → {res.tier.upper()} ({res.best_score:.1f})")
