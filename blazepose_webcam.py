@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import mediapipe as mp
 import math
+from bisect import bisect_right
 
 from scoring_engine import (
     load_choreography, ScoringEngine, DEFAULT_THRESHOLDS
@@ -153,39 +154,6 @@ def draw_landmarks(frame_bgr, landmarks_norm_list, kp_color=KP_COLOR, bone_color
     for (x, y) in pts:
         cv2.circle(frame_bgr, (x, y), radius, kp_color, -1, lineType=cv2.LINE_AA)
 
-def draw_norm_xy_pose_scaled(frame_bgr, norm_xy_dict, top_left, size, 
-                             kp_color=(255, 200, 0), bone_color=(220, 220, 220),
-                             radius=2, thickness=1):
-    """
-    Draw a mini stick-figure using the JSON's pose.norm_xy (dict: str(index)->[x,y], 0..1).
-    top_left: (x0, y0) pixel of the miniature.
-    size: (w, h) pixel box to draw in (preserves norm positions within this box).
-    Only draws connections where both endpoints exist in norm_xy_dict.
-    """
-    if not norm_xy_dict:
-        return
-    x0, y0 = top_left
-    box_w, box_h = size
-
-    # Convert keys to ints and points to px
-    pts = {}
-    for k, (nx, ny) in norm_xy_dict.items():
-        try:
-            idx = int(k)
-        except Exception:
-            continue
-        px = int(x0 + nx * box_w)
-        py = int(y0 + ny * box_h)
-        pts[idx] = (px, py)
-
-    # Bones
-    for a, b in POSE_CONNECTIONS:
-        if a in pts and b in pts:
-            cv2.line(frame_bgr, pts[a], pts[b], bone_color, thickness, cv2.LINE_AA)
-    # Keypoints (draw only the ones we have)
-    for (px, py) in pts.values():
-        cv2.circle(frame_bgr, (px, py), radius, kp_color, -1, lineType=cv2.LINE_AA)
-
 # --- Overlay helpers ---
 def draw_text_shadow(img, text, org, scale=0.7, color=(255,255,255), thickness=2):
     x, y = org
@@ -200,60 +168,8 @@ def draw_countdown_overlay(frame_bgr, ms_left):
 def draw_idle_overlay(frame_bgr, moves, window_half_ms):
     draw_text_shadow(frame_bgr, "Ready.", (10, 75), scale=0.9, color=(200, 200, 255))
 
-# ---------- Carousel/ghost helpers (used for left list) ----------
-def _render_ghost_from_norm_xy(norm_xy, size=(96, 120)):
-    """
-    Render a tiny stick-figure image from pose.norm_xy onto a BGR image.
-    """
-    w, h = size
-    canvas = np.zeros((h, w, 3), dtype=np.uint8)
-    if not norm_xy:
-        return canvas
-
-    # Convert to px inside this mini-canvas with a small margin
-    margin = 6
-    box_w = w - 2*margin
-    box_h = h - 2*margin
-    pts = {}
-    for k, (nx, ny) in norm_xy.items():
-        try:
-            idx = int(k)
-        except Exception:
-            continue
-        px = int(margin + nx * box_w)
-        py = int(margin + ny * box_h)
-        pts[idx] = (px, py)
-
-    # Bones
-    for a, b in POSE_CONNECTIONS:
-        if a in pts and b in pts:
-            cv2.line(canvas, pts[a], pts[b], (220, 220, 220), 1, cv2.LINE_AA)
-    # Keypoints
-    for (px, py) in pts.values():
-        cv2.circle(canvas, (px, py), 2, (255, 200, 0), -1, lineType=cv2.LINE_AA)
-
-    return canvas
-
-def build_ghost_cache(moves, ghost_size=(96, 120)):
-    """
-    Pre-render per-move ghosts once to avoid per-frame work.
-    Keyed by move.start_ms (or any unique field).
-    """
-    cache = {}
-    for m in moves:
-        norm_xy = None
-        try:
-            norm_xy = (m.raw.get("pose", {}) or {}).get("norm_xy", None)
-        except Exception:
-            pass
-        cache[m.start_ms] = _render_ghost_from_norm_xy(norm_xy, ghost_size)
-    return cache
-
-def _truncate(text, max_chars):
-    return (text[:max_chars-1] + "…") if len(text) > max_chars else text
-
 # ---------- NEW LAYOUT HELPERS ----------
-def find_current_and_upcoming(moves, game_ts_ms, max_upcoming=4):
+def find_current_and_upcoming(moves, game_ts_ms, max_upcoming=4, start_times=None):
     """
     Returns:
       current_move: the move whose start_ms is the latest <= game_ts_ms,
@@ -261,14 +177,13 @@ def find_current_and_upcoming(moves, game_ts_ms, max_upcoming=4):
     """
     if not moves:
         return None, []
-    past = [m for m in moves if m.start_ms <= game_ts_ms]
-    if past:
-        current = max(past, key=lambda m: m.start_ms)
-        after = [m for m in moves if m.start_ms > current.start_ms]
-    else:
-        current = moves[0]
-        after = moves[1:]
-    return current, after[:max_upcoming]
+    starts = start_times if start_times is not None else [m.start_ms for m in moves]
+    idx = bisect_right(starts, game_ts_ms) - 1
+    if idx < 0:
+        idx = 0
+    current = moves[idx]
+    upcoming_start = idx + 1
+    return current, moves[upcoming_start:upcoming_start + max_upcoming]
 
 def scale_norm_xy(norm_xy_dict, zoom=1.2):
     """Scale normalized [0..1] coords around centroid; clamp to [0,1]."""
@@ -336,7 +251,7 @@ def draw_current_json_pose_center(frame_bgr, current_move, next_move=None, game_
                          scale=0.7, color=(200,200,200), thickness=2)
 
 
-def draw_upcoming_right_list(frame_bgr, upcoming, game_ts_ms, ghost_cache, max_items=4):
+def draw_upcoming_right_list(frame_bgr, upcoming, max_items=4):
     """
     Right-side vertical list of the next N moves.
     Pose-only cards (no text). Top card gets a 'NEXT' tag (top-right).
@@ -489,15 +404,6 @@ def draw_norm_xy_pose_fit(frame_bgr, norm_xy_dict, top_left, size,
 def draw_points_hud(img, points, pos=(10, 38)):
     draw_text_shadow(img, f"Score: {int(points)}", pos, scale=1.0, color=(255,255,255), thickness=2)
 
-def draw_tier_banner(img, tier, score, move_name, y_px=120):
-    t = (tier or "miss").lower()
-    color = TIER_COLORS.get(t, (255,255,255))
-    text = f"{t.upper()}  +{int(score)}"
-    H, W = img.shape[:2]
-    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
-    x = max(12, (W - text_size[0]) // 2)
-    draw_text_shadow(img, text, (x, y_px), scale=1.2, color=color, thickness=3)
-
 # --- Pose tweening Helpers ---
 
 def _ease(t, mode="cubic"):
@@ -573,8 +479,7 @@ def main():
         print(f"[!] Could not load DISPLAY choreography: {e}")
         display_moves = []
 
-    # All drawing caches should use the DISPLAY chart
-    ghost_cache = build_ghost_cache(display_moves, ghost_size=(96, 120))
+    display_start_times = [m.start_ms for m in display_moves]
 
 
     # Create scoring engine (JSON-based)
@@ -708,7 +613,9 @@ def main():
                 current_move, upcoming = (None, [])
                 if display_moves:
                     if state in ("running", "paused"):
-                        current_move, upcoming = find_current_and_upcoming(display_moves, game_ts_ms, max_upcoming=4)
+                        current_move, upcoming = find_current_and_upcoming(
+                            display_moves, game_ts_ms, max_upcoming=4, start_times=display_start_times
+                        )
                     else:
                         current_move = display_moves[0]
                         upcoming = display_moves[1:5]
@@ -717,7 +624,7 @@ def main():
                 draw_current_json_pose_center(canvas, current_move, next_move=next_move, game_ts_ms=game_ts_ms)
 
                 # 6) Left: vertical upcoming list (next 4)
-                draw_upcoming_right_list(canvas, upcoming, game_ts_ms, ghost_cache, max_items=4)
+                draw_upcoming_right_list(canvas, upcoming, max_items=4)
 
                 # 7) Bottom-left: PiP live camera with skeleton
                 draw_pip_live_skeleton(canvas, live_view)

@@ -438,9 +438,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_prev_beat = QtWidgets.QPushButton("← Prev Beat")
         self.btn_prev_beat.clicked.connect(self._jump_to_prev_beat)
 
-        self.btn_next_beat = QtWidgets.QPushButton("Next Beat →")
-        self.btn_next_beat.clicked.connect(self._jump_to_next_beat)
-
         self._last_jump_ms: Optional[int] = None  # remembers last seek/jump target
 
 
@@ -550,12 +547,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.player.play()
         else:
             self.player.pause()
-
-    def keyPressEvent(self, e: QtGui.QKeyEvent):
-        if e.key() == QtCore.Qt.Key.Key_Space:
-            self._toggle_play()
-        else:
-            super().keyPressEvent(e)
 
     # ----- Preview schedule (explicit times) -----
     def _build_moves_schedule(self) -> List[Tuple[int,int,Move]]:
