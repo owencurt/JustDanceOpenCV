@@ -1,195 +1,138 @@
 # JustDanceOpenCV
 
-A lightweight **Just Dance-style prototype** built with **OpenCV** and **MediaPipe BlazePose**.
+A Just Dance-style prototype with a **Python pose/scoring backend** and a new **browser frontend game UI**.
 
-It includes:
-- A **live gameplay app** (`blazepose_webcam.py`) that scores your webcam pose against a choreography chart.
-- A **pose authoring editor** (`pose_author_editor.py`) to create/edit choreography JSON from video.
-- A reusable **scoring engine** (`scoring_engine.py`) that evaluates timing + pose quality.
+## What changed
+
+The project now supports a frontend-driven UX while preserving the existing scoring pipeline:
+
+- ✅ MediaPipe BlazePose detection still runs in Python.
+- ✅ Existing JSON choreography + `ScoringEngine` move evaluation is reused.
+- ✅ A FastAPI server now exposes:
+  - MJPEG webcam feed (`/video/feed`)
+  - realtime game state over WebSocket (`/ws/state`)
+  - session/options APIs (`/api/*`)
+- ✅ A web UI (in `frontend/`) shows:
+  - webcam view
+  - current move card
+  - upcoming move queue
+  - live score + combo + feedback
+  - session controls (start/pause/reset)
+  - options/settings toggles
+  - reference media controls
+
+The original OpenCV-only gameplay app (`blazepose_webcam.py`) is kept for compatibility.
 
 ---
 
-## Features
+## Architecture
 
-- Real-time webcam pose tracking with MediaPipe Tasks BlazePose.
-- Pose similarity scoring using joint angles (elbows/shoulders/hips).
-- Tiered move results (`perfect`, `great`, `good`, `ok`, `miss`) and cumulative points.
-- Countdown/start/pause/reset controls for gameplay.
-- Authoring tool to:
-  - open a source video,
-  - initialize poses from BlazePose AI detection,
-  - drag/edit joints manually,
-  - add/copy/paste/delete timed moves,
-  - export chart JSON.
+See [architecture.md](architecture.md) for details.
 
----
+At a glance:
 
-## Repository structure
-
-```text
-.
-├── blazepose_webcam.py      # Main webcam gameplay runtime
-├── pose_author_editor.py    # PyQt6 chart authoring tool
-├── scoring_engine.py        # Move-window scoring logic
-├── charts/
-│   ├── ymca.json            # Example scoring chart
-│   └── ymca_extra.json      # Example display chart
-├── reference_poses/
-│   └── yoga.webp            # Reference media
-└── PROJECT_CONTEXT.md       # Concise maintainer context for future AI/dev work
-```
+- `backend_server.py`: backend runtime loop + API/WebSocket/stream endpoints.
+- `pose_pipeline.py`: shared pose embedding/similarity/drawing helpers.
+- `scoring_engine.py`: timing-window move scoring and tiering.
+- `frontend/`: browser UI (`index.html`, `app.js`, `styles.css`).
+- `charts/*.json`: choreography source-of-truth.
 
 ---
 
 ## Requirements
 
-- Python **3.10+** (3.11 recommended)
-- Webcam (for gameplay)
-- OS audio/video support for PyQt6 multimedia (for editor playback)
+- Python 3.10+
+- Webcam
+- Model file: `models/pose_landmarker_full.task`
 
-Python packages used:
-- `opencv-python`
-- `numpy`
-- `mediapipe`
-- `PyQt6`
+Install backend dependencies:
 
-> Note: This project expects a MediaPipe pose landmarker model file at:
-> `models/pose_landmarker_full.task`
+```bash
+pip install -r requirements.txt
+```
 
 ---
 
-## Setup from scratch
+## Run
 
-### 1) Clone the repository
-
-```bash
-git clone <YOUR_REPO_URL>
-cd JustDanceOpenCV
-```
-
-### 2) Create and activate a virtual environment
-
-**macOS/Linux**
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-**Windows (PowerShell)**
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-### 3) Install dependencies
+### New frontend + backend flow (recommended)
 
 ```bash
-pip install --upgrade pip
-pip install opencv-python numpy mediapipe PyQt6
+uvicorn backend_server:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 4) Download BlazePose model
+Then open: `http://localhost:8000`
 
-Create a `models/` folder and place the model file as:
-
-```text
-models/pose_landmarker_full.task
-```
-
-You can use the official MediaPipe Tasks pose landmarker model assets from Google/MediaPipe documentation.
-
----
-
-## Run the apps
-
-### Gameplay runtime (webcam scoring)
+### Legacy OpenCV window runtime
 
 ```bash
 python blazepose_webcam.py
 ```
 
-Default chart config is in the top of the file:
-- `SCORING_JSON_PATH` → scoring target chart
-- `CHOREO_JSON_PATH` → displayed target poses
+---
 
-### Pose authoring editor
+## Data contract (frontend/backend)
 
-```bash
-python pose_author_editor.py
-```
+### WebSocket: `ws://localhost:8000/ws/state`
 
-Use this flow:
-1. Open video.
-2. Set BPM/offset.
-3. Init pose from frame (AI) or blank pose.
-4. Adjust joints manually if needed.
-5. Add moves with time stamps.
-6. Export JSON into `charts/`.
+Payload includes:
+
+- `status` (`idle`, `countdown`, `running`, `paused`)
+- `game_ts_ms`
+- `score`, `combo`, `best_combo`
+- `feedback` (`tier`, `gained`, `move_name`, timeout)
+- `current_move` (`name`, `start_ms`, `norm_xy`)
+- `upcoming_moves[]`
+- `options`
+- `chart_meta`
+
+### REST
+
+- `POST /api/session/start`
+- `POST /api/session/pause-toggle`
+- `POST /api/session/reset`
+- `POST /api/options`
+- `GET /api/config`
+
+### Video stream
+
+- `GET /video/feed` (MJPEG)
 
 ---
 
-## Gameplay controls
+## JSON choreography format
 
-In the gameplay window:
-- `SPACE`: start countdown / restart run
-- `P`: pause/resume
-- `R`: reset to idle
-- `Q`: quit
+Charts remain unchanged and should provide:
 
----
-
-## Chart format (overview)
-
-Each chart JSON includes metadata and a list of moves:
-- `start_ms`: move timing
-- `pose.angles`: scoring embedding reference
-- `pose.norm_xy`: normalized keypoint layout for rendering target skeletons
-
-The scoring engine loads and sorts `moves` by `start_ms`.
+- top-level metadata (`title`, `video_path`, `bpm`, `offset_ms`)
+- `moves[]` with:
+  - `start_ms`
+  - `pose.angles` (used for scoring)
+  - `pose.norm_xy` (used for frontend pose drawing)
 
 ---
 
-## Common troubleshooting
+## Configuration
 
-### Webcam fails to open
-- Ensure camera permissions are enabled for your terminal/app.
-- Close other apps that may be using the camera.
+Current defaults in `backend_server.py`:
 
-### No pose detected
-- Improve lighting.
-- Keep full upper body visible.
-- Move farther from camera to include torso and arms.
-
-### Editor has no audio/video sync
-- Some codec/container combinations can drift.
-- Re-encode source video to a common format (e.g., H.264 MP4).
-
-### Model file errors
-- Verify `models/pose_landmarker_full.task` exists.
-- Confirm file name matches exactly.
+- `CHOREO_JSON_PATH = charts/ymca_extra.json`
+- `SCORING_JSON_PATH = charts/ymca.json`
+- `MODEL_PATH = models/pose_landmarker_full.task`
 
 ---
 
-## Development notes
+## Known limitations
 
-- Keep scoring key names consistent across exporter/runtime:
-  - `l_elbow`, `r_elbow`, `l_shoulder`, `r_shoulder`, `l_hip`, `r_hip`.
-- If you change chart schema, update both:
-  - exporter (`pose_author_editor.py`) and
-  - loader (`scoring_engine.py`).
-- Use `PROJECT_CONTEXT.md` for a concise architectural brief before making changes.
+- Reference media path is read from chart `video_path`; file must exist in-repo for in-browser playback.
+- MJPEG stream is simple and broadly compatible, but not as bandwidth-efficient as WebRTC.
+- Single-player / single-webcam runtime.
 
 ---
 
-## Quick validation
+## Extension points
 
-```bash
-python -m py_compile blazepose_webcam.py scoring_engine.py pose_author_editor.py
-```
-
----
-
-## License
-
-No license file is currently present in this repository.
-Add a license if you plan to distribute or open-source this project.
+- Replace MJPEG with WebRTC/WebCodecs for lower-latency camera transport.
+- Add chart/song selector endpoint and frontend screen.
+- Add multiplayer leaderboard state in backend.
+- Add richer judgement timing bars in frontend.

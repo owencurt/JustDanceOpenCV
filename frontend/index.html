@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Just Dance OpenCV UI</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="hud">
+      <div class="stat"><span>Score</span><strong id="score">0</strong></div>
+      <div class="stat"><span>Combo</span><strong id="combo">0</strong></div>
+      <div class="stat"><span>Best Combo</span><strong id="bestCombo">0</strong></div>
+      <div class="stat"><span>Status</span><strong id="status">idle</strong></div>
+      <div id="feedback" class="feedback">Ready.</div>
+    </header>
+
+    <main class="grid">
+      <section class="panel webcam">
+        <h2>Webcam</h2>
+        <img id="webcamFeed" src="/video/feed" alt="webcam feed" />
+      </section>
+
+      <section class="panel moves">
+        <h2>Current Move</h2>
+        <div id="moveName" class="move-name">—</div>
+        <canvas id="currentPoseCanvas" width="640" height="360"></canvas>
+      </section>
+
+      <section class="panel queue">
+        <h2>Upcoming Moves</h2>
+        <div id="upcomingMoves" class="upcoming-list"></div>
+      </section>
+
+      <section class="panel controls">
+        <h2>Session & Media Controls</h2>
+        <div class="button-row">
+          <button id="startBtn">Start</button>
+          <button id="pauseBtn">Pause/Resume</button>
+          <button id="resetBtn">Reset</button>
+        </div>
+        <div class="toggles">
+          <label><input id="webcamToggle" type="checkbox" checked /> Webcam</label>
+          <label><input id="overlayToggle" type="checkbox" checked /> Landmarks Overlay</label>
+          <label><input id="refVideoToggle" type="checkbox" checked /> Reference Video</label>
+          <label><input id="refAudioToggle" type="checkbox" checked /> Reference Audio</label>
+        </div>
+        <div class="media-wrap">
+          <video id="referenceVideo" controls></video>
+          <audio id="referenceAudio" controls></audio>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>
