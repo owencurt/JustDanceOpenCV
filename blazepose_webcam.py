@@ -4,7 +4,17 @@ import cv2
 import numpy as np
 import mediapipe as mp
 import math
+import os
 from bisect import bisect_right
+from dataclasses import dataclass
+
+try:
+    from PyQt6.QtCore import QUrl
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+    PYQT_MEDIA_AVAILABLE = True
+except Exception:
+    PYQT_MEDIA_AVAILABLE = False
 
 from scoring_engine import (
     load_choreography, ScoringEngine, DEFAULT_THRESHOLDS
@@ -24,11 +34,13 @@ TIER_THRESHOLDS = DEFAULT_THRESHOLDS      # or override: {"perfect": 90, "great"
 
 # --- Start/Control ---
 START_COUNTDOWN_MS = 3000                 # 3-2-1 before the timer starts
-INSTRUCTIONS = "SPACE to start - P to pause/resume - R to reset - Q to quit"
+INSTRUCTIONS = "SPACE start/restart • P pause • R reset • A audio • V video • Q quit"
 
 # --- Drawing params ---
 POSE_CONNECTIONS = mp.solutions.pose.POSE_CONNECTIONS
 MODEL_PATH = "models/pose_landmarker_full.task"  # _lite / _full / _heavy
+GUIDE_MEDIA_PATH = None  # optional fallback path, e.g. "media/ymca.mp4"
+MEDIA_OFFSET_MS = 0
 
 LANDMARK_RADIUS = 3
 LINE_THICKNESS = 2
@@ -314,6 +326,74 @@ def draw_upcoming_right_list(frame_bgr, upcoming, max_items=4):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
 
+def draw_upcoming_timeline(frame_bgr, current_move, upcoming, game_ts_ms):
+    """
+    Bottom timeline that previews upcoming beats with time-to-hit labels.
+    """
+    if current_move is None:
+        return
+
+    H, W = frame_bgr.shape[:2]
+    bar_w, bar_h = int(W * 0.56), 88
+    x = (W - bar_w) // 2
+    y = H - bar_h - 22
+    radius = 14
+
+    overlay = frame_bgr.copy()
+    cv2.rectangle(overlay, (x, y), (x + bar_w, y + bar_h), (32, 32, 32), -1, cv2.LINE_AA)
+    frame_bgr[:] = cv2.addWeighted(overlay, 0.58, frame_bgr, 0.42, 0)
+    cv2.rectangle(frame_bgr, (x, y), (x + bar_w, y + bar_h), (160, 160, 160), 2, cv2.LINE_AA)
+
+    cx = x + 24
+    draw_text_shadow(frame_bgr, "NOW", (cx, y + 28), scale=0.6, color=(115, 255, 150), thickness=2)
+    draw_text_shadow(frame_bgr, current_move.name[:18], (cx, y + 58), scale=0.6, color=(255, 255, 255), thickness=2)
+
+    if not upcoming:
+        return
+
+    slot_start_x = x + 175
+    slot_w = max(95, (bar_w - 205) // 4)
+    for i, move in enumerate(upcoming[:4]):
+        sx = slot_start_x + i * slot_w
+        eta_ms = max(0, move.start_ms - game_ts_ms)
+        eta_s = eta_ms / 1000.0
+        dot_color = (60, 210, 255) if i == 0 else (200, 200, 200)
+        cv2.circle(frame_bgr, (sx, y + 30), 8 if i == 0 else 6, dot_color, -1, cv2.LINE_AA)
+        tag = "NEXT" if i == 0 else f"+{i+1}"
+        draw_text_shadow(frame_bgr, tag, (sx - 20, y + 56), scale=0.52, color=dot_color, thickness=1)
+        draw_text_shadow(frame_bgr, f"{eta_s:0.1f}s", (sx - 23, y + 76), scale=0.56, color=(255, 255, 255), thickness=1)
+
+
+def draw_next_move_focus(frame_bgr, upcoming, game_ts_ms):
+    if not upcoming:
+        return
+    next_move = upcoming[0]
+    H, W = frame_bgr.shape[:2]
+    panel_w, panel_h = 300, 190
+    x, y = W - panel_w - 18, 62
+
+    cv2.rectangle(frame_bgr, (x, y), (x + panel_w, y + panel_h), (255, 255, 255), -1, cv2.LINE_AA)
+    cv2.rectangle(frame_bgr, (x, y), (x + panel_w, y + panel_h), (80, 210, 150), 3, cv2.LINE_AA)
+    draw_text_shadow(frame_bgr, "UP NEXT", (x + 14, y + 30), scale=0.72, color=(60, 185, 120), thickness=2)
+    draw_text_shadow(frame_bgr, next_move.name[:20], (x + 14, y + 58), scale=0.72, color=(25, 25, 25), thickness=2)
+    eta_ms = max(0, next_move.start_ms - game_ts_ms)
+    draw_text_shadow(frame_bgr, f"In {eta_ms/1000.0:0.1f}s", (x + 14, y + 84), scale=0.65, color=(40, 40, 40), thickness=2)
+
+    norm_xy = _get_pose_norm_xy(next_move)
+    if norm_xy:
+        draw_norm_xy_pose_fit(
+            frame_bgr,
+            norm_xy_dict=scale_norm_xy(norm_xy, zoom=UPCOMING_POSE_ZOOM),
+            top_left=(x + 12, y + 92),
+            size=(panel_w - 24, panel_h - 102),
+            target_aspect=CHOREO_ASPECT,
+            kp_color=(255, 190, 50),
+            bone_color=(140, 140, 140),
+            radius=2,
+            thickness=1,
+        )
+
+
 def draw_pip_live_skeleton(base_canvas_bgr, live_frame_bgr, mirror=True):
     """
     Bottom-left PiP of the *already-annotated* live camera view.
@@ -404,6 +484,89 @@ def draw_norm_xy_pose_fit(frame_bgr, norm_xy_dict, top_left, size,
 def draw_points_hud(img, points, pos=(10, 38)):
     draw_text_shadow(img, f"Score: {int(points)}", pos, scale=1.0, color=(255,255,255), thickness=2)
 
+
+@dataclass
+class ToggleState:
+    audio_on: bool = True
+    video_on: bool = True
+    audio_rect: tuple = (0, 0, 0, 0)
+    video_rect: tuple = (0, 0, 0, 0)
+
+
+def draw_toggle_chip(frame_bgr, label, enabled, rect):
+    x, y, w, h = rect
+    bg = (70, 175, 110) if enabled else (90, 90, 90)
+    cv2.rectangle(frame_bgr, (x, y), (x + w, y + h), bg, -1, cv2.LINE_AA)
+    cv2.rectangle(frame_bgr, (x, y), (x + w, y + h), (220, 220, 220), 1, cv2.LINE_AA)
+    draw_text_shadow(frame_bgr, f"{label}: {'ON' if enabled else 'OFF'}", (x + 10, y + 23), scale=0.56, color=(255, 255, 255), thickness=1)
+
+
+def draw_media_toggles(frame_bgr, toggles: ToggleState):
+    H, W = frame_bgr.shape[:2]
+    chip_w, chip_h = 130, 32
+    x = W - chip_w - 18
+    toggles.audio_rect = (x, H - 86, chip_w, chip_h)
+    toggles.video_rect = (x, H - 46, chip_w, chip_h)
+    draw_toggle_chip(frame_bgr, "Audio (A)", toggles.audio_on, toggles.audio_rect)
+    draw_toggle_chip(frame_bgr, "Video (V)", toggles.video_on, toggles.video_rect)
+
+
+def _point_in_rect(px, py, rect):
+    x, y, w, h = rect
+    return x <= px <= x + w and y <= py <= y + h
+
+
+class MediaController:
+    def __init__(self, media_path):
+        self.media_path = media_path if media_path and os.path.exists(media_path) else None
+        self.video_cap = cv2.VideoCapture(self.media_path) if self.media_path else None
+        self.video_fps = (self.video_cap.get(cv2.CAP_PROP_FPS) or 30.0) if self.video_cap else 30.0
+        self.last_video_ts = -1
+
+        self.qt_app = None
+        self.player = None
+        self.audio_out = None
+        if self.media_path and PYQT_MEDIA_AVAILABLE:
+            self.qt_app = QApplication.instance() or QApplication([])
+            self.player = QMediaPlayer()
+            self.audio_out = QAudioOutput()
+            self.audio_out.setVolume(0.85)
+            self.player.setAudioOutput(self.audio_out)
+            self.player.setSource(QUrl.fromLocalFile(os.path.abspath(self.media_path)))
+
+    def get_video_frame(self, ts_ms, enabled=True):
+        if not enabled or not self.video_cap:
+            return None
+        if self.last_video_ts < 0 or abs(ts_ms - self.last_video_ts) > 75:
+            self.video_cap.set(cv2.CAP_PROP_POS_MSEC, max(0, ts_ms))
+        ok, frame = self.video_cap.read()
+        if not ok:
+            self.video_cap.set(cv2.CAP_PROP_POS_MSEC, 0)
+            ok, frame = self.video_cap.read()
+            if not ok:
+                return None
+        self.last_video_ts = ts_ms
+        return frame
+
+    def sync_audio(self, ts_ms, running, enabled=True):
+        if not self.player:
+            return
+        if self.qt_app:
+            self.qt_app.processEvents()
+        if (not running) or (not enabled):
+            self.player.pause()
+            return
+        if abs(self.player.position() - ts_ms) > 120:
+            self.player.setPosition(max(0, int(ts_ms)))
+        if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            self.player.play()
+
+    def close(self):
+        if self.video_cap:
+            self.video_cap.release()
+        if self.player:
+            self.player.stop()
+
 # --- Pose tweening Helpers ---
 
 def _ease(t, mode="cubic"):
@@ -480,6 +643,18 @@ def main():
         display_moves = []
 
     display_start_times = [m.start_ms for m in display_moves]
+    media_path = GUIDE_MEDIA_PATH
+    if not media_path and display_moves:
+        # follow chart metadata if path exists on this machine
+        try:
+            chart_video = display_moves[0].raw.get("video_path")
+            if chart_video and os.path.exists(chart_video):
+                media_path = chart_video
+        except Exception:
+            pass
+
+    media = MediaController(media_path)
+    toggles = ToggleState(audio_on=True, video_on=True)
 
 
     # Create scoring engine (JSON-based)
@@ -511,6 +686,19 @@ def main():
     countdown_deadline = None
     running_zero_monotonic = None  # wall clock when we started running
 
+    mouse_state = {"toggle_click": None}
+
+    def _on_mouse(event, x, y, flags, param):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        if _point_in_rect(x, y, toggles.audio_rect):
+            mouse_state["toggle_click"] = "audio"
+        elif _point_in_rect(x, y, toggles.video_rect):
+            mouse_state["toggle_click"] = "video"
+
+    cv2.namedWindow("BlazePose Webcam")
+    cv2.setMouseCallback("BlazePose Webcam", _on_mouse)
+
     with PoseLandmarker.create_from_options(options) as landmarker:
         mp_ts_ms = 0  # monotonically increasing for MediaPipe only
         try:
@@ -540,6 +728,13 @@ def main():
                     game_ts_ms = int((time.monotonic() - running_zero_monotonic) * 1000)
                 elif state == "paused":
                     pass  # paused label drawn later
+
+                if mouse_state["toggle_click"] == "audio":
+                    toggles.audio_on = not toggles.audio_on
+                    mouse_state["toggle_click"] = None
+                elif mouse_state["toggle_click"] == "video":
+                    toggles.video_on = not toggles.video_on
+                    mouse_state["toggle_click"] = None
 
                 # --- JSON scoring only when running ---
                 live_emb = None
@@ -585,6 +780,12 @@ def main():
                 # 2) Fresh canvas for the composed scene
                 canvas = np.zeros_like(frame_bgr)
 
+                media_ts = max(0, game_ts_ms + MEDIA_OFFSET_MS)
+                guide = media.get_video_frame(media_ts, enabled=(toggles.video_on and state in ("running", "paused", "countdown")))
+                if guide is not None:
+                    guide = cv2.resize(guide, (W, H), interpolation=cv2.INTER_AREA)
+                    canvas[:] = cv2.addWeighted(guide, 0.28, canvas, 0.72, 0)
+
                 # 3) State overlays
                 if state == "idle":
                     draw_idle_overlay(canvas, display_moves, WINDOW_HALF_MS)
@@ -623,16 +824,26 @@ def main():
                 next_move = upcoming[0] if upcoming else None
                 draw_current_json_pose_center(canvas, current_move, next_move=next_move, game_ts_ms=game_ts_ms)
 
-                # 6) Left: vertical upcoming list (next 4)
-                draw_upcoming_right_list(canvas, upcoming, max_items=4)
+                # 6) Focused "next move" card + timeline preview
+                draw_next_move_focus(canvas, upcoming, game_ts_ms)
+                draw_upcoming_timeline(canvas, current_move, upcoming, game_ts_ms)
 
                 # 7) Bottom-left: PiP live camera with skeleton
                 draw_pip_live_skeleton(canvas, live_view)
 
-                # 8) Controls overlay (always)
-                draw_text_shadow(canvas, INSTRUCTIONS, (650, canvas.shape[0] - 12), scale=0.6, color=(200,200,200), thickness=2)
+                # 8) Media toggles
+                draw_media_toggles(canvas, toggles)
 
-                # 9) Present
+                # 9) Controls overlay (always)
+                draw_text_shadow(canvas, INSTRUCTIONS, (430, canvas.shape[0] - 12), scale=0.6, color=(200,200,200), thickness=2)
+
+                media.sync_audio(
+                    media_ts,
+                    running=(state == "running"),
+                    enabled=toggles.audio_on
+                )
+
+                # 10) Present
                 frame_bgr = canvas
                 cv2.imshow("BlazePose Webcam", frame_bgr)
 
@@ -670,12 +881,17 @@ def main():
                     game_ts_ms = 0
                     countdown_deadline = None
                     running_zero_monotonic = None
+                elif key == ord('a'):
+                    toggles.audio_on = not toggles.audio_on
+                elif key == ord('v'):
+                    toggles.video_on = not toggles.video_on
 
 
         except KeyboardInterrupt:
             print("\n[i] Stopping (Ctrl+C).")
         finally:
             cap.release()
+            media.close()
             cv2.destroyAllWindows()
             if scoring_moves:
                 leftovers = scorer.finalize_all()
