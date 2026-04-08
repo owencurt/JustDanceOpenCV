@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Just Dance Clone - Web Runtime</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <h1>Just Dance Clone</h1>
+      <div class="controls">
+        <button id="startBtn">Start</button>
+        <button id="pauseBtn">Pause</button>
+        <button id="resetBtn">Reset</button>
+        <button id="audioBtn" class="active">Audio On</button>
+        <button id="videoBtn" class="active">Video On</button>
+      </div>
+    </header>
+
+    <section class="stage">
+      <div class="video-panel" id="videoPanel">
+        <video id="referenceVideo" playsinline preload="auto" controls></video>
+        <div id="countdown" class="countdown hidden">3</div>
+      </div>
+
+      <aside class="right-rail">
+        <div class="card now-card">
+          <div class="label">Now</div>
+          <div id="nowMove" class="move-name">-</div>
+        </div>
+        <div class="card next-card">
+          <div class="label">Up Next</div>
+          <div id="nextMove" class="move-name">-</div>
+          <div id="nextEta" class="eta">--</div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="timeline-card">
+      <div class="timeline-head">Upcoming Moves</div>
+      <div id="timeline" class="timeline"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

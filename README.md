@@ -6,6 +6,7 @@ It includes:
 - A **live gameplay app** (`blazepose_webcam.py`) that scores your webcam pose against a choreography chart.
 - A **pose authoring editor** (`pose_author_editor.py`) to create/edit choreography JSON from video.
 - A reusable **scoring engine** (`scoring_engine.py`) that evaluates timing + pose quality.
+- A **browser runtime scaffold** (`webapp/backend.py` + `webapp/static/`) for modern UI + reliable media playback.
 
 ---
 
@@ -111,6 +112,21 @@ python blazepose_webcam.py
 Default chart config is in the top of the file:
 - `SCORING_JSON_PATH` → scoring target chart
 - `CHOREO_JSON_PATH` → displayed target poses
+
+### Browser runtime (new UI scaffold)
+
+```bash
+pip install fastapi uvicorn
+uvicorn webapp.backend:app --reload
+```
+
+Then open `http://127.0.0.1:8000`.
+
+This runtime:
+- renders choreography timing in a browser UI,
+- plays reference media with native browser `<video>` playback (audio + video),
+- includes separate audio/video toggles,
+- is designed as the migration path for moving UX out of raw OpenCV windows while keeping Python as backend.
 
 ### Pose authoring editor
 
