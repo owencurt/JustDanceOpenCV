@@ -134,6 +134,21 @@ class DanceRuntime:
         current = self.display_moves[idx]
         return current, self.display_moves[idx + 1 : idx + 1 + max_upcoming]
 
+    def _advance_game_clock_locked(self):
+        if self.state == "countdown" and self.countdown_deadline is not None:
+            ms_left = int((self.countdown_deadline - time.monotonic()) * 1000)
+            if ms_left <= 0:
+                self.state = "running"
+                self.running_zero_monotonic = time.monotonic()
+                self.game_ts_ms = 0
+        elif self.state == "running" and self.running_zero_monotonic is not None:
+            self.game_ts_ms = int((time.monotonic() - self.running_zero_monotonic) * 1000)
+
+    def _refresh_current_moves_locked(self):
+        current, upcoming = self._find_current_and_upcoming()
+        self.current_move = current
+        self.upcoming_moves = upcoming
+
     def _run_loop(self):
         cap = cv2.VideoCapture(0)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -164,9 +179,12 @@ class DanceRuntime:
 
         with landmarker_ctx as landmarker:
             while not self._stop.is_set():
-                ok, frame = cap.read()
                 with self.lock:
                     self.last_loop_ts = int(time.monotonic() * 1000)
+                    self._advance_game_clock_locked()
+                    self._refresh_current_moves_locked()
+
+                ok, frame = cap.read()
                 if not ok:
                     with self.lock:
                         self.runtime_error = "Webcam frame grab failed"
@@ -184,14 +202,7 @@ class DanceRuntime:
                 result = landmarker.detect_for_video(mp_image, mp_ts_ms)
 
                 with self.lock:
-                    if self.state == "countdown":
-                        ms_left = int((self.countdown_deadline - time.monotonic()) * 1000)
-                        if ms_left <= 0:
-                            self.state = "running"
-                            self.running_zero_monotonic = time.monotonic()
-                            self.game_ts_ms = 0
-                    elif self.state == "running":
-                        self.game_ts_ms = int((time.monotonic() - self.running_zero_monotonic) * 1000)
+                    self._advance_game_clock_locked()
 
                     live_emb = None
                     if result and result.pose_landmarks and webcam_enabled:
@@ -219,9 +230,7 @@ class DanceRuntime:
                                 "show_until_ms": self.game_ts_ms + 1000,
                             }
 
-                    current, upcoming = self._find_current_and_upcoming()
-                    self.current_move = current
-                    self.upcoming_moves = upcoming
+                    self._refresh_current_moves_locked()
 
                 frame_out = frame.copy()
                 if show_landmarks and result and result.pose_landmarks:
@@ -239,13 +248,8 @@ class DanceRuntime:
     def state_payload(self):
         with self.lock:
             # Keep game clock progression robust even if frame loop stalls.
-            if self.state == "countdown" and self.countdown_deadline is not None:
-                if int((self.countdown_deadline - time.monotonic()) * 1000) <= 0:
-                    self.state = "running"
-                    self.running_zero_monotonic = time.monotonic()
-                    self.game_ts_ms = 0
-            elif self.state == "running" and self.running_zero_monotonic is not None:
-                self.game_ts_ms = int((time.monotonic() - self.running_zero_monotonic) * 1000)
+            self._advance_game_clock_locked()
+            self._refresh_current_moves_locked()
 
             feedback = self.last_feedback
             if feedback and self.game_ts_ms > feedback["show_until_ms"]:

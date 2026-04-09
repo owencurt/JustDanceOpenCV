@@ -141,6 +141,7 @@ If clicking **Start** keeps the app in idle/countdown or doesn’t score:
    - `models/pose_landmarker_full.task`
 3. Confirm webcam is not blocked by another app.
 4. Open browser devtools and verify `POST /api/session/start` returns `200`.
+5. Verify `GET /api/config` shows `game_ts_ms` increasing while running. If it is flat, check webcam access and backend logs.
 
 The frontend now shows backend runtime errors directly in the feedback area, and it falls back to polling when WebSocket is unavailable.
 
