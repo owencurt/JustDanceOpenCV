@@ -1,7 +1,8 @@
 {
   "schema_version": 2,
   "title": "YMCA",
-  "video_path": "/Users/owencurtis/JustDanceOpenCV/charts/video_path.mp4",
+  "media_path": "charts/video_path.mp4",
+  "video_path": "charts/video_path.mp4",
   "bpm": 127.0,
   "offset_ms": 0,
   "moves": [

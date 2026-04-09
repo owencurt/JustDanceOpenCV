@@ -206,20 +206,59 @@ Legacy scripts are still present for compatibility:
 
 ---
 
+## Chart media (new)
+
+Browser gameplay now supports synchronized audio playback from a chart-associated MP4 file.
+
+### Chart JSON field
+
+Add a media field at the chart root:
+
+```json
+{
+  "schema_version": 2,
+  "title": "YMCA",
+  "media_path": "charts/video_path.mp4",
+  "moves": [ ... ]
+}
+```
+
+- `media_path` is the preferred field (source of truth).
+- `video_path` is still read as a backward-compatible fallback.
+- If a chart has no media field, gameplay still runs silently.
+
+### Where to place media files
+
+- Put media files under `charts/` (for example: `charts/video_path.mp4`).
+- Backend serves that folder at `/charts/*`, and frontend uses that URL during gameplay.
+- In local dev, Vite proxies `/charts` to the backend.
+
+### Audio controls
+
+- Browser UI now includes an **Audio: On/Off** toggle in the toolbar.
+- Default is **Audio On**.
+- Turning audio off pauses chart media immediately while gameplay/scoring continues.
+- Turning audio on seeks to the current game timestamp and resumes playback so timing stays aligned.
+
+### Timing + autoplay behavior
+
+- Gameplay timing remains driven by backend game clock (`game_ts_ms`).
+- Frontend continuously syncs media playback position to that clock to avoid drift.
+- Frame-upload flow now resets its in-flight send lock on WebSocket reconnect/close so countdown can always progress into running state after reconnects or chart changes.
+- If autoplay is blocked by browser policy, use a user interaction (for example Audio toggle, Start/Resume) and then resume; gameplay still runs even if audio cannot start.
+
+---
+
 ## Known limitations / follow-up recommendations
 
 1. **Network hop in local loop:**
    Webcam frames now cross browser → backend WebSocket, so latency depends on frame size/FPS and CPU.
    - Current frontend sends ~15 FPS at 640x360 JPEG for practical responsiveness.
 
-2. **No audio choreography playback in browser yet:**
-   Existing gameplay parity is pose/scoring/state-focused.
-   - Add synchronized song/video playback in frontend in a future iteration.
-
-3. **Pose rendering parity:**
+2. **Pose rendering parity:**
    The browser UI reproduces layout/functionality but not pixel-identical OpenCV visuals.
 
-4. **Production deployment hardening:**
+3. **Production deployment hardening:**
    For production, add:
    - auth/session limits,
    - structured logging,

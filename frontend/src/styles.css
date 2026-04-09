@@ -76,3 +76,13 @@ button {
 .hidden-video {
   display: none;
 }
+
+.audio-toggle {
+  border-color: #3cb478;
+}
+
+.audio-toggle:disabled {
+  opacity: 0.55;
+  border-color: #555;
+  cursor: not-allowed;
+}
