@@ -15,6 +15,50 @@ const FEEDBACK_COLORS = {
 }
 
 const MEDIA_SYNC_TOLERANCE_SEC = 0.12
+const MOVE_TRANSITION_MS = 240
+const QUEUE_TRANSITION_MS = 260
+
+const clamp01 = (v) => Math.max(0, Math.min(1, v))
+const easeOutCubic = (t) => 1 - Math.pow(1 - clamp01(t), 3)
+const lerp = (a, b, t) => a + (b - a) * t
+
+const moveKey = (move, index = 0) => {
+  if (!move) return `none-${index}`
+  return `${move.name || 'move'}-${move.start_ms ?? index}`
+}
+
+function lerpNormPose(fromPose, toPose, t) {
+  const keys = new Set([
+    ...Object.keys(fromPose || {}),
+    ...Object.keys(toPose || {}),
+  ])
+  const out = {}
+  keys.forEach((key) => {
+    const from = fromPose?.[key]
+    const to = toPose?.[key]
+    if (from && to) {
+      out[key] = [lerp(from[0], to[0], t), lerp(from[1], to[1], t)]
+      return
+    }
+    out[key] = to || from
+  })
+  return out
+}
+
+function drawRoundedRect(ctx, x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2)
+  ctx.beginPath()
+  ctx.moveTo(x + radius, y)
+  ctx.lineTo(x + w - radius, y)
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius)
+  ctx.lineTo(x + w, y + h - radius)
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h)
+  ctx.lineTo(x + radius, y + h)
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius)
+  ctx.lineTo(x, y + radius)
+  ctx.quadraticCurveTo(x, y, x + radius, y)
+  ctx.closePath()
+}
 
 function drawNormPose(ctx, normXY, x, y, w, h, { lineColor = '#ddd', pointColor = '#ffc800' } = {}) {
   if (!normXY) return
@@ -53,6 +97,14 @@ export default function App() {
   const serverFrameRef = useRef(null)
   const mediaUrlRef = useRef('')
   const audioEnabledRef = useRef(true)
+  const currentMoveRef = useRef(null)
+  const previousMoveRef = useRef(null)
+  const moveTransitionStartRef = useRef(performance.now())
+  const queueTransitionRef = useRef({
+    fromKeys: [],
+    toKeys: [],
+    startAt: performance.now(),
+  })
 
   const [status, setStatus] = useState('Connecting...')
   const [charts, setCharts] = useState([])
@@ -205,6 +257,23 @@ export default function App() {
       if (data.type === 'ready') {
         setStatus(`Ready (${data.state})`)
       } else if (data.type === 'frame_result') {
+        const nextMoveKey = moveKey(data.current_move)
+        const prevMoveKey = moveKey(currentMoveRef.current)
+        if (nextMoveKey !== prevMoveKey) {
+          previousMoveRef.current = currentMoveRef.current
+          currentMoveRef.current = data.current_move
+          moveTransitionStartRef.current = performance.now()
+        }
+
+        const nextQueueKeys = (data.upcoming_moves || []).map((m, i) => moveKey(m, i))
+        const activeQueueKeys = queueTransitionRef.current.toKeys
+        if (nextQueueKeys.join('|') !== activeQueueKeys.join('|')) {
+          queueTransitionRef.current = {
+            fromKeys: activeQueueKeys.length ? activeQueueKeys : nextQueueKeys,
+            toKeys: nextQueueKeys,
+            startAt: performance.now(),
+          }
+        }
         serverFrameRef.current = data
         syncAudioToFrame(data)
       } else if (data.type === 'ack') {
@@ -288,24 +357,112 @@ export default function App() {
       const ctx = canvas.getContext('2d')
       const W = canvas.width
       const H = canvas.height
-      ctx.fillStyle = '#101010'
+      const now = performance.now()
+
+      const bg = ctx.createLinearGradient(0, 0, W, H)
+      bg.addColorStop(0, '#0d0f21')
+      bg.addColorStop(0.45, '#191334')
+      bg.addColorStop(1, '#0b1a2f')
+      ctx.fillStyle = bg
       ctx.fillRect(0, 0, W, H)
 
-      if (frame?.current_move?.norm_xy) {
-        drawNormPose(ctx, frame.current_move.norm_xy, 0, 0, W, H, { lineColor: '#e5e5e5', pointColor: '#ffc800' })
+      const pulse = 0.5 + 0.5 * Math.sin(now / 380)
+      const stageW = W * 0.48
+      const stageH = H * 0.78
+      const stageX = W * 0.23
+      const stageY = H * 0.1
+      ctx.save()
+      ctx.globalAlpha = 0.92
+      drawRoundedRect(ctx, stageX, stageY, stageW, stageH, 24)
+      const stageGrad = ctx.createLinearGradient(stageX, stageY, stageX, stageY + stageH)
+      stageGrad.addColorStop(0, '#24154f')
+      stageGrad.addColorStop(1, '#111328')
+      ctx.fillStyle = stageGrad
+      ctx.fill()
+      ctx.strokeStyle = `rgba(126, 233, 255, ${0.35 + pulse * 0.25})`
+      ctx.lineWidth = 3
+      ctx.stroke()
+      ctx.restore()
+
+      const moveProgress = easeOutCubic((now - moveTransitionStartRef.current) / MOVE_TRANSITION_MS)
+      const blendedPose = lerpNormPose(
+        previousMoveRef.current?.norm_xy || currentMoveRef.current?.norm_xy,
+        currentMoveRef.current?.norm_xy,
+        moveProgress,
+      )
+
+      if (blendedPose) {
+        drawNormPose(
+          ctx,
+          blendedPose,
+          stageX + 45,
+          stageY + 62,
+          stageW - 90,
+          stageH - 140,
+          { lineColor: '#f0f5ff', pointColor: '#47ffd5' },
+        )
       }
 
-      const cardW = 220
-      const cardH = 140
-      frame?.upcoming_moves?.forEach((m, i) => {
-        const x = W - cardW - 16
-        const y = 60 + i * (cardH + 12)
-        ctx.fillStyle = '#fff'
-        ctx.fillRect(x, y, cardW, cardH)
-        ctx.strokeStyle = i === 0 ? '#3cb478' : '#888'
-        ctx.lineWidth = 2
-        ctx.strokeRect(x, y, cardW, cardH)
-        drawNormPose(ctx, m.norm_xy, x + 12, y + 12, cardW - 24, cardH - 24, { lineColor: '#aaa', pointColor: '#ffcf57' })
+      const nowLabelY = stageY + 36
+      ctx.fillStyle = '#7efff3'
+      ctx.font = '700 20px Inter, system-ui'
+      ctx.fillText('NOW', stageX + 28, nowLabelY)
+      ctx.fillStyle = '#ffffff'
+      ctx.font = '700 34px Inter, system-ui'
+      ctx.fillText(frame?.current_move?.name || 'Get Ready', stageX + 28, nowLabelY + 36)
+
+      const cardW = 265
+      const cardH = 118
+      const queueX = W - cardW - 24
+      const queueY = 82
+      const queueGap = 16
+      const currentQueue = frame?.upcoming_moves || []
+      const prevQueue = queueTransitionRef.current.fromKeys
+      const queueProgress = easeOutCubic((now - queueTransitionRef.current.startAt) / QUEUE_TRANSITION_MS)
+
+      ctx.fillStyle = '#9ab2ff'
+      ctx.font = '700 18px Inter, system-ui'
+      ctx.fillText('UP NEXT', queueX, queueY - 20)
+
+      currentQueue.forEach((m, i) => {
+        const key = moveKey(m, i)
+        const prevIndex = prevQueue.indexOf(key)
+        const fromIndex = prevIndex === -1 ? -1 : prevIndex
+        const targetY = queueY + i * (cardH + queueGap)
+        const fromY = queueY + fromIndex * (cardH + queueGap)
+        const animatedY = lerp(fromY, targetY, queueProgress)
+        const isSoon = i === 0
+
+        ctx.save()
+        ctx.globalAlpha = fromIndex === -1 ? queueProgress : 1
+        drawRoundedRect(ctx, queueX, animatedY, cardW, cardH, 18)
+        const cardGrad = ctx.createLinearGradient(queueX, animatedY, queueX + cardW, animatedY + cardH)
+        cardGrad.addColorStop(0, isSoon ? '#33205e' : '#23253f')
+        cardGrad.addColorStop(1, isSoon ? '#4f2c95' : '#1a1d35')
+        ctx.fillStyle = cardGrad
+        ctx.fill()
+        ctx.strokeStyle = isSoon ? '#4affd7' : '#92a6d6'
+        ctx.lineWidth = isSoon ? 3 : 2
+        ctx.stroke()
+
+        drawNormPose(
+          ctx,
+          m.norm_xy,
+          queueX + 9,
+          animatedY + 9,
+          98,
+          cardH - 18,
+          { lineColor: isSoon ? '#f2f8ff' : '#bbc8e3', pointColor: isSoon ? '#40ffd0' : '#ffd36f' },
+        )
+
+        ctx.fillStyle = '#f7f8ff'
+        ctx.font = isSoon ? '700 23px Inter, system-ui' : '600 20px Inter, system-ui'
+        ctx.fillText(m.name || 'Move', queueX + 120, animatedY + 45)
+        const eta = Math.max(0, ((m.start_ms || 0) - (frame?.game_ts_ms || 0)) / 1000)
+        ctx.fillStyle = isSoon ? '#7ef9e1' : '#a4b0d5'
+        ctx.font = '600 16px Inter, system-ui'
+        ctx.fillText(isSoon ? `Next • ${eta.toFixed(1)}s` : `In ${eta.toFixed(1)}s`, queueX + 120, animatedY + 74)
+        ctx.restore()
       })
 
       const pipW = 360

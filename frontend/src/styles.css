@@ -5,7 +5,7 @@
 
 body {
   margin: 0;
-  background: #0b0b0b;
+  background: radial-gradient(circle at 15% 10%, #2a1a5e 0%, #0b0f22 45%, #070910 100%);
   color: #f7f7f7;
 }
 
@@ -19,15 +19,17 @@ body {
 }
 
 .toolbar {
-  background: #171717;
-  border: 1px solid #303030;
-  border-radius: 10px;
+  background: linear-gradient(120deg, rgba(18, 23, 48, 0.92), rgba(22, 11, 44, 0.9));
+  border: 1px solid #3a3f67;
+  border-radius: 14px;
   padding: 12px;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.38);
 }
 
 .toolbar h1 {
   margin: 0 0 10px;
-  font-size: 1.2rem;
+  font-size: 1.25rem;
+  letter-spacing: 0.02em;
 }
 
 .selectors,
@@ -47,8 +49,8 @@ label {
 
 select,
 button {
-  background: #262626;
-  border: 1px solid #434343;
+  background: #232a4a;
+  border: 1px solid #4f6294;
   color: #f4f4f4;
   border-radius: 6px;
   padding: 6px 10px;
@@ -56,15 +58,26 @@ button {
 
 button {
   cursor: pointer;
+  transition: transform 120ms ease, filter 120ms ease, border-color 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.08);
+}
+
+button:active {
+  transform: translateY(0);
 }
 
 .game-canvas {
   width: 100%;
   max-width: 1280px;
-  border: 1px solid #333;
-  border-radius: 10px;
+  border: 1px solid #39446f;
+  border-radius: 14px;
   align-self: center;
   background: #000;
+  box-shadow: 0 20px 38px rgba(5, 7, 20, 0.56);
 }
 
 .status {
@@ -78,7 +91,7 @@ button {
 }
 
 .audio-toggle {
-  border-color: #3cb478;
+  border-color: #49d2a4;
 }
 
 .audio-toggle:disabled {
