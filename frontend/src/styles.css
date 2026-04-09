@@ -1,0 +1,78 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, system-ui, Arial, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #0b0b0b;
+  color: #f7f7f7;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  box-sizing: border-box;
+}
+
+.toolbar {
+  background: #171717;
+  border: 1px solid #303030;
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.toolbar h1 {
+  margin: 0 0 10px;
+  font-size: 1.2rem;
+}
+
+.selectors,
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+}
+
+select,
+button {
+  background: #262626;
+  border: 1px solid #434343;
+  color: #f4f4f4;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+button {
+  cursor: pointer;
+}
+
+.game-canvas {
+  width: 100%;
+  max-width: 1280px;
+  border: 1px solid #333;
+  border-radius: 10px;
+  align-self: center;
+  background: #000;
+}
+
+.status {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #bbb;
+}
+
+.hidden-video {
+  display: none;
+}
