@@ -101,26 +101,17 @@ function drawCapsule(ctx, a, b, radius) {
   ctx.closePath()
 }
 
-function drawLimb(ctx, a, b, c, upperRadius, lowerRadius, fillStyle, outlineStyle, outlineWidth = 2.5) {
-  if (!a || !b) return false
-  drawCapsule(ctx, a, b, upperRadius)
+function drawCapsuleStyled(ctx, a, b, radius, fillStyle, outlineStyle, outlineWidth = 2.5) {
+  if (!a || !b) return
+  drawCapsule(ctx, a, b, radius)
   ctx.fillStyle = fillStyle
   ctx.fill()
   ctx.strokeStyle = outlineStyle
   ctx.lineWidth = outlineWidth
   ctx.stroke()
-  if (c) {
-    drawCapsule(ctx, b, c, lowerRadius)
-    ctx.fillStyle = fillStyle
-    ctx.fill()
-    ctx.strokeStyle = outlineStyle
-    ctx.lineWidth = Math.max(1.5, outlineWidth * 0.9)
-    ctx.stroke()
-  }
-  return true
 }
 
-function drawTorso(ctx, leftShoulder, rightShoulder, leftHip, rightHip) {
+function traceTorsoPath(ctx, leftShoulder, rightShoulder, leftHip, rightHip) {
   const shoulderCenter = midpoint(leftShoulder, rightShoulder)
   const hipCenter = midpoint(leftHip, rightHip)
   const spine = { x: hipCenter.x - shoulderCenter.x, y: hipCenter.y - shoulderCenter.y }
@@ -145,6 +136,10 @@ function drawTorso(ctx, leftShoulder, rightShoulder, leftHip, rightHip) {
   ctx.quadraticCurveTo(rightShoulder.x, rightShoulder.y, rs.x, rs.y)
   ctx.quadraticCurveTo(shoulderCenter.x, shoulderCenter.y, ls.x, ls.y)
   ctx.closePath()
+}
+
+function drawTorso(ctx, leftShoulder, rightShoulder, leftHip, rightHip) {
+  traceTorsoPath(ctx, leftShoulder, rightShoulder, leftHip, rightHip)
   ctx.fill()
 }
 
@@ -166,9 +161,13 @@ function drawCoachPose(
 ) {
   if (!normXY) return
   const pts = {}
-  Object.entries(normXY).forEach(([k, [nx, ny]]) => {
+  Object.entries(normXY).forEach(([k, value]) => {
+    const nx = value?.[0]
+    const ny = value?.[1]
+    const nz = value?.[2]
+    if (typeof nx !== 'number' || typeof ny !== 'number') return
     const idx = Number(k)
-    pts[idx] = { x: x + nx * w, y: y + ny * h }
+    pts[idx] = { x: x + nx * w, y: y + ny * h, z: typeof nz === 'number' ? nz : null }
   })
 
   const ls = pts[LM.LEFT_SHOULDER]
@@ -194,62 +193,83 @@ function drawCoachPose(
   )
 
   const bodyHeight = Math.max(torsoLen + legLen, 1)
-  const limbBase = Math.max(6, bodyHeight * 0.048)
-  const armUpperR = limbBase * 0.98
-  const armLowerR = limbBase * 0.83
-  const legUpperR = limbBase * 1.12
-  const legLowerR = limbBase * 0.98
+  const limbBase = Math.max(7.5, bodyHeight * 0.055)
+  const armUpperR = limbBase * 1.02
+  const armLowerR = limbBase * 0.88
+  const legUpperR = limbBase * 1.16
+  const legLowerR = limbBase * 1.02
 
   ctx.save()
   ctx.shadowColor = glow
   ctx.shadowBlur = glowStrength
 
-  const limbs = [
-    { a: ls, b: le, c: lw, upperR: armUpperR, lowerR: armLowerR },
-    { a: rs, b: re, c: rw, upperR: armUpperR, lowerR: armLowerR },
-    { a: lh, b: lk, c: la, upperR: legUpperR, lowerR: legLowerR },
-    { a: rh, b: rk, c: ra, upperR: legUpperR, lowerR: legLowerR },
-  ]
-    .filter((limb) => limb.a && limb.b)
-    .sort((p, q) => {
-      const pDepth = (p.a.y + p.b.y + (p.c?.y ?? p.b.y)) / (p.c ? 3 : 2)
-      const qDepth = (q.a.y + q.b.y + (q.c?.y ?? q.b.y)) / (q.c ? 3 : 2)
-      return pDepth - qDepth
-    })
+  const depthScore = (...points) => {
+    const valid = points.filter(Boolean)
+    const zValues = valid.map((p) => p.z).filter((z) => typeof z === 'number')
+    if (zValues.length > 0) {
+      const avgZ = zValues.reduce((sum, z) => sum + z, 0) / zValues.length
+      return -avgZ
+    }
+    const avgY = valid.reduce((sum, p) => sum + p.y, 0) / Math.max(valid.length, 1)
+    return avgY / Math.max(1, h)
+  }
 
-  ctx.fillStyle = fill
-  ctx.strokeStyle = shadowEdge
-  ctx.lineWidth = Math.max(2.5, limbBase * 0.42)
-  drawTorso(ctx, ls, rs, lh, rh)
-  ctx.stroke()
-  limbs.forEach((limb) => {
-    drawLimb(ctx, limb.a, limb.b, limb.c, limb.upperR, limb.lowerR, fill, shadowEdge, Math.max(2, limbBase * 0.34))
+  const outerStroke = Math.max(2.2, limbBase * 0.36)
+  const innerStroke = Math.max(1.2, limbBase * 0.22)
+  const parts = []
+
+  parts.push({
+    depth: depthScore(ls, rs, lh, rh),
+    drawBase: () => {
+      ctx.fillStyle = fill
+      ctx.strokeStyle = shadowEdge
+      ctx.lineWidth = outerStroke
+      traceTorsoPath(ctx, ls, rs, lh, rh)
+      ctx.fill()
+      ctx.stroke()
+    },
+    drawCore: () => {
+      ctx.fillStyle = core
+      ctx.strokeStyle = outline
+      ctx.lineWidth = innerStroke
+      traceTorsoPath(
+        ctx,
+        pointOnLine(ls, rs, 0.18),
+        pointOnLine(ls, rs, 0.82),
+        pointOnLine(lh, rh, 0.16),
+        pointOnLine(lh, rh, 0.84),
+      )
+      ctx.fill()
+      ctx.stroke()
+    },
   })
+
+  const addSegment = (a, b, radius) => {
+    if (!a || !b) return
+    parts.push({
+      depth: depthScore(a, b),
+      drawBase: () => drawCapsuleStyled(ctx, a, b, radius, fill, shadowEdge, outerStroke),
+      drawCore: () => drawCapsuleStyled(ctx, pointOnLine(a, b, 0.08), pointOnLine(a, b, 0.92), radius * 0.58, core, outline, innerStroke),
+    })
+  }
+
+  addSegment(ls, le, armUpperR)
+  addSegment(le, lw, armLowerR)
+  addSegment(rs, re, armUpperR)
+  addSegment(re, rw, armLowerR)
+  addSegment(lh, lk, legUpperR)
+  addSegment(lk, la, legLowerR)
+  addSegment(rh, rk, legUpperR)
+  addSegment(rk, ra, legLowerR)
+
+  const sortedParts = parts.sort((a, b) => a.depth - b.depth)
+  sortedParts.forEach((part) => part.drawBase())
 
   ctx.shadowBlur = Math.max(2, glowStrength * 0.45)
-  ctx.fillStyle = core
-  ctx.globalAlpha = 0.35
-  drawTorso(ctx, pointOnLine(ls, rs, 0.2), pointOnLine(ls, rs, 0.8), pointOnLine(lh, rh, 0.18), pointOnLine(lh, rh, 0.82))
-  limbs.forEach((limb) => {
-    drawLimb(
-      ctx,
-      pointOnLine(limb.a, limb.b || limb.a, 0.08),
-      pointOnLine(limb.a, limb.b || limb.a, 0.9),
-      limb.c && pointOnLine(limb.b || limb.a, limb.c, 0.82),
-      limb.upperR * 0.6,
-      limb.lowerR * 0.55,
-      core,
-      outline,
-      Math.max(1.2, limbBase * 0.2),
-    )
-  })
+  ctx.globalAlpha = 0.34
+  sortedParts.forEach((part) => part.drawCore())
 
   ctx.globalAlpha = 1
-  ctx.fillStyle = fill
-  ctx.strokeStyle = outline
-  ctx.lineWidth = Math.max(1.8, limbBase * 0.23)
-  drawTorso(ctx, ls, rs, lh, rh)
-  ctx.stroke()
 
   ctx.restore()
 }
