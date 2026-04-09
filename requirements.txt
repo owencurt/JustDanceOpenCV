@@ -1,0 +1,6 @@
+opencv-python
+numpy
+mediapipe
+PyQt6
+fastapi
+uvicorn[standard]
