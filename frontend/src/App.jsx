@@ -14,6 +14,8 @@ const FEEDBACK_COLORS = {
   miss: '#888',
 }
 
+const MEDIA_SYNC_TOLERANCE_SEC = 0.12
+
 function drawNormPose(ctx, normXY, x, y, w, h, { lineColor = '#ddd', pointColor = '#ffc800' } = {}) {
   if (!normXY) return
   const pts = {}
@@ -42,6 +44,7 @@ function drawNormPose(ctx, normXY, x, y, w, h, { lineColor = '#ddd', pointColor 
 
 export default function App() {
   const videoRef = useRef(null)
+  const audioRef = useRef(null)
   const canvasRef = useRef(null)
   const captureRef = useRef(document.createElement('canvas'))
   const wsRef = useRef(null)
@@ -50,21 +53,100 @@ export default function App() {
 
   const [status, setStatus] = useState('Connecting...')
   const [charts, setCharts] = useState([])
+  const [chartMeta, setChartMeta] = useState({})
   const [scoringChart, setScoringChart] = useState('ymca.json')
   const [choreoChart, setChoreoChart] = useState('ymca_extra.json')
+  const [audioEnabled, setAudioEnabled] = useState(true)
+  const [audioStatus, setAudioStatus] = useState('Audio follows the chart media when available.')
 
   const canSendFrames = useMemo(() => !!wsRef.current && wsRef.current.readyState === WebSocket.OPEN, [status])
+
+  const mediaUrl = chartMeta[choreoChart]?.media_url || ''
+
+  const seekAndPause = (targetSec = 0) => {
+    const media = audioRef.current
+    if (!media || !mediaUrl) return
+    const clampedTarget = Math.max(0, targetSec)
+    try {
+      if (Math.abs((media.currentTime || 0) - clampedTarget) > 0.05) {
+        media.currentTime = clampedTarget
+      }
+    } catch (_) {
+      // Some browsers can throw if metadata is not loaded yet.
+    }
+    media.pause()
+  }
+
+  const syncAudioToFrame = (frame) => {
+    const media = audioRef.current
+    if (!media || !mediaUrl || !frame) return
+
+    if (!audioEnabled) {
+      seekAndPause(frame.game_ts_ms ? frame.game_ts_ms / 1000 : 0)
+      return
+    }
+
+    if (frame.state === 'running') {
+      const targetSec = Math.max(0, (frame.game_ts_ms || 0) / 1000)
+      if (Math.abs((media.currentTime || 0) - targetSec) > MEDIA_SYNC_TOLERANCE_SEC) {
+        media.currentTime = targetSec
+      }
+      if (media.paused) {
+        media.play().catch(() => {
+          setAudioStatus('Audio blocked by browser autoplay policy. Click Audio Off/On, then Resume.')
+        })
+      }
+      return
+    }
+
+    if (frame.state === 'paused') {
+      seekAndPause((frame.game_ts_ms || 0) / 1000)
+      return
+    }
+
+    if (frame.state === 'countdown') {
+      seekAndPause(0)
+      return
+    }
+
+    if (frame.state === 'idle') {
+      seekAndPause(0)
+    }
+  }
 
   useEffect(() => {
     fetch('/api/charts')
       .then((r) => r.json())
       .then((d) => {
         setCharts(d.charts || [])
+        setChartMeta(d.chart_meta || {})
         if (d.default_scoring) setScoringChart(d.default_scoring)
         if (d.default_choreo) setChoreoChart(d.default_choreo)
       })
       .catch(() => setStatus('Backend unreachable'))
   }, [])
+
+  useEffect(() => {
+    if (!mediaUrl) {
+      setAudioStatus('No chart media found. Gameplay runs without soundtrack.')
+      return
+    }
+    setAudioStatus(audioEnabled ? 'Audio enabled.' : 'Audio disabled.')
+  }, [audioEnabled, mediaUrl])
+
+  useEffect(() => {
+    const media = audioRef.current
+    if (!media) return
+
+    media.pause()
+    media.load()
+
+    if (mediaUrl) {
+      setAudioStatus(audioEnabled ? 'Media loaded. Audio will start with gameplay.' : 'Media loaded. Audio is disabled.')
+    } else {
+      setAudioStatus('No chart media found. Gameplay runs without soundtrack.')
+    }
+  }, [mediaUrl, choreoChart, audioEnabled])
 
   useEffect(() => {
     let stream
@@ -111,6 +193,7 @@ export default function App() {
         setStatus(`Ready (${data.state})`)
       } else if (data.type === 'frame_result') {
         serverFrameRef.current = data
+        syncAudioToFrame(data)
       } else if (data.type === 'ack') {
         setStatus(`State: ${data.state}`)
       } else if (data.type === 'error') {
@@ -260,6 +343,30 @@ export default function App() {
   const sendCommand = (action) => {
     if (!canSendFrames) return
     wsRef.current.send(JSON.stringify({ type: 'command', action }))
+
+    if (action === 'start' || action === 'resume') {
+      const frame = serverFrameRef.current
+      if (frame) syncAudioToFrame(frame)
+    }
+
+    if (action === 'reset') {
+      seekAndPause(0)
+    }
+  }
+
+  const toggleAudio = () => {
+    const next = !audioEnabled
+    setAudioEnabled(next)
+
+    if (!next) {
+      seekAndPause((serverFrameRef.current?.game_ts_ms || 0) / 1000)
+      return
+    }
+
+    const frame = serverFrameRef.current
+    if (frame) {
+      syncAudioToFrame(frame)
+    }
   }
 
   return (
@@ -284,12 +391,25 @@ export default function App() {
           <button onClick={() => sendCommand('resume')}>Resume</button>
           <button onClick={() => sendCommand('reset')}>Reset</button>
           <button onClick={connectSocket}>Reconnect</button>
+          <button className="audio-toggle" onClick={toggleAudio} disabled={!mediaUrl}>
+            Audio: {audioEnabled ? 'On' : 'Off'}
+          </button>
         </div>
         <p className="status">{status}</p>
+        <p className="status">Media: {mediaUrl || 'none'}</p>
+        <p className="status">{audioStatus}</p>
       </header>
 
       <canvas ref={canvasRef} width={1280} height={720} className="game-canvas" />
       <video ref={videoRef} className="hidden-video" playsInline muted />
+      <video
+        ref={audioRef}
+        className="hidden-video"
+        src={mediaUrl || undefined}
+        playsInline
+        preload="auto"
+        onError={() => setAudioStatus('Failed to load chart media file. Check path and file location.')}
+      />
     </div>
   )
 }
