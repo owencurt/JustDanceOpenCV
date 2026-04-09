@@ -1,5 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+const LM = {
+  LEFT_SHOULDER: 11,
+  RIGHT_SHOULDER: 12,
+  LEFT_ELBOW: 13,
+  RIGHT_ELBOW: 14,
+  LEFT_WRIST: 15,
+  RIGHT_WRIST: 16,
+  LEFT_HIP: 23,
+  RIGHT_HIP: 24,
+  LEFT_KNEE: 25,
+  RIGHT_KNEE: 26,
+  LEFT_ANKLE: 27,
+  RIGHT_ANKLE: 28,
+}
+
 const POSE_CONNECTIONS = [
   [11, 13], [13, 15], [12, 14], [14, 16],
   [11, 12], [11, 23], [12, 24], [23, 24],
@@ -60,30 +75,275 @@ function drawRoundedRect(ctx, x, y, w, h, r) {
   ctx.closePath()
 }
 
-function drawNormPose(ctx, normXY, x, y, w, h, { lineColor = '#ddd', pointColor = '#ffc800' } = {}) {
+function midpoint(a, b) {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+}
+
+function pointOnLine(a, b, t) {
+  return { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) }
+}
+
+function drawCapsule(ctx, a, b, radius) {
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const len = Math.hypot(dx, dy)
+  if (len < 1e-5) return
+
+  const nx = -dy / len
+  const ny = dx / len
+
+  ctx.beginPath()
+  ctx.moveTo(a.x + nx * radius, a.y + ny * radius)
+  ctx.lineTo(b.x + nx * radius, b.y + ny * radius)
+  ctx.arc(b.x, b.y, radius, Math.atan2(ny, nx), Math.atan2(-ny, -nx), false)
+  ctx.lineTo(a.x - nx * radius, a.y - ny * radius)
+  ctx.arc(a.x, a.y, radius, Math.atan2(-ny, -nx), Math.atan2(ny, nx), false)
+  ctx.closePath()
+}
+
+function drawCapsuleStyled(ctx, a, b, radius, fillStyle, outlineStyle, outlineWidth = 2.5) {
+  if (!a || !b) return
+  drawCapsule(ctx, a, b, radius)
+  ctx.fillStyle = fillStyle
+  ctx.fill()
+  ctx.strokeStyle = outlineStyle
+  ctx.lineWidth = outlineWidth
+  ctx.stroke()
+}
+
+function traceTorsoPath(ctx, leftShoulder, rightShoulder, leftHip, rightHip) {
+  const shoulderCenter = midpoint(leftShoulder, rightShoulder)
+  const hipCenter = midpoint(leftHip, rightHip)
+  const spine = { x: hipCenter.x - shoulderCenter.x, y: hipCenter.y - shoulderCenter.y }
+  const spineLen = Math.max(1, Math.hypot(spine.x, spine.y))
+  const nx = -spine.y / spineLen
+  const ny = spine.x / spineLen
+
+  const shoulderWidth = Math.hypot(rightShoulder.x - leftShoulder.x, rightShoulder.y - leftShoulder.y)
+  const hipWidth = Math.hypot(rightHip.x - leftHip.x, rightHip.y - leftHip.y)
+  const shoulderBulge = shoulderWidth * 0.17
+  const hipBulge = hipWidth * 0.09
+
+  const ls = { x: leftShoulder.x - nx * shoulderBulge, y: leftShoulder.y - ny * shoulderBulge }
+  const rs = { x: rightShoulder.x + nx * shoulderBulge, y: rightShoulder.y + ny * shoulderBulge }
+  const lh = { x: leftHip.x - nx * hipBulge, y: leftHip.y - ny * hipBulge }
+  const rh = { x: rightHip.x + nx * hipBulge, y: rightHip.y + ny * hipBulge }
+
+  ctx.beginPath()
+  ctx.moveTo(ls.x, ls.y)
+  ctx.quadraticCurveTo(leftShoulder.x, leftShoulder.y, lh.x, lh.y)
+  ctx.quadraticCurveTo(hipCenter.x, hipCenter.y, rh.x, rh.y)
+  ctx.quadraticCurveTo(rightShoulder.x, rightShoulder.y, rs.x, rs.y)
+  ctx.quadraticCurveTo(shoulderCenter.x, shoulderCenter.y, ls.x, ls.y)
+  ctx.closePath()
+}
+
+function drawTorso(ctx, leftShoulder, rightShoulder, leftHip, rightHip) {
+  traceTorsoPath(ctx, leftShoulder, rightShoulder, leftHip, rightHip)
+  ctx.fill()
+}
+
+function drawCoachPose(
+  ctx,
+  normXY,
+  x,
+  y,
+  w,
+  h,
+  {
+    fill = '#2ea5ff',
+    core = '#6fd5ff',
+    glow = 'rgba(150, 230, 255, 0.8)',
+    glowStrength = 18,
+    outline = 'rgba(232, 247, 255, 0.98)',
+    shadowEdge = 'rgba(22, 68, 130, 0.8)',
+  } = {},
+) {
+  if (!normXY) return
+  const pts = {}
+  Object.entries(normXY).forEach(([k, value]) => {
+    const nx = value?.[0]
+    const ny = value?.[1]
+    const nz = value?.[2]
+    if (typeof nx !== 'number' || typeof ny !== 'number') return
+    const idx = Number(k)
+    pts[idx] = { x: x + nx * w, y: y + ny * h, z: typeof nz === 'number' ? nz : null }
+  })
+
+  const ls = pts[LM.LEFT_SHOULDER]
+  const rs = pts[LM.RIGHT_SHOULDER]
+  const le = pts[LM.LEFT_ELBOW]
+  const re = pts[LM.RIGHT_ELBOW]
+  const lw = pts[LM.LEFT_WRIST]
+  const rw = pts[LM.RIGHT_WRIST]
+  const lh = pts[LM.LEFT_HIP]
+  const rh = pts[LM.RIGHT_HIP]
+  const lk = pts[LM.LEFT_KNEE]
+  const rk = pts[LM.RIGHT_KNEE]
+  const la = pts[LM.LEFT_ANKLE]
+  const ra = pts[LM.RIGHT_ANKLE]
+  if (!ls || !rs || !lh || !rh) return
+
+  const shoulderCenter = midpoint(ls, rs)
+  const hipCenter = midpoint(lh, rh)
+  const torsoLen = Math.max(24, Math.hypot(hipCenter.x - shoulderCenter.x, hipCenter.y - shoulderCenter.y))
+  const legLen = Math.max(
+    Math.hypot((lk?.x ?? lh.x) - lh.x, (lk?.y ?? lh.y) - lh.y) + Math.hypot((la?.x ?? lk?.x ?? lh.x) - (lk?.x ?? lh.x), (la?.y ?? lk?.y ?? lh.y) - (lk?.y ?? lh.y)),
+    Math.hypot((rk?.x ?? rh.x) - rh.x, (rk?.y ?? rh.y) - rh.y) + Math.hypot((ra?.x ?? rk?.x ?? rh.x) - (rk?.x ?? rh.x), (ra?.y ?? rk?.y ?? rh.y) - (rk?.y ?? rh.y)),
+  )
+
+  const bodyHeight = Math.max(torsoLen + legLen, 1)
+  const limbBase = Math.max(7.5, bodyHeight * 0.055)
+  const armUpperR = limbBase * 1.02
+  const armLowerR = limbBase * 0.88
+  const legUpperR = limbBase * 1.16
+  const legLowerR = limbBase * 1.02
+
+  ctx.save()
+  ctx.shadowColor = glow
+  ctx.shadowBlur = glowStrength
+
+  const depthScore = (...points) => {
+    const valid = points.filter(Boolean)
+    const zValues = valid.map((p) => p.z).filter((z) => typeof z === 'number')
+    if (zValues.length > 0) {
+      const avgZ = zValues.reduce((sum, z) => sum + z, 0) / zValues.length
+      return -avgZ
+    }
+    const avgY = valid.reduce((sum, p) => sum + p.y, 0) / Math.max(valid.length, 1)
+    return avgY / Math.max(1, h)
+  }
+
+  const outerStroke = Math.max(2.2, limbBase * 0.36)
+  const innerStroke = Math.max(1.2, limbBase * 0.22)
+  const parts = []
+
+  parts.push({
+    depth: depthScore(ls, rs, lh, rh),
+    drawBase: () => {
+      ctx.fillStyle = fill
+      ctx.strokeStyle = shadowEdge
+      ctx.lineWidth = outerStroke
+      traceTorsoPath(ctx, ls, rs, lh, rh)
+      ctx.fill()
+      ctx.stroke()
+    },
+    drawCore: () => {
+      ctx.fillStyle = core
+      ctx.strokeStyle = outline
+      ctx.lineWidth = innerStroke
+      traceTorsoPath(
+        ctx,
+        pointOnLine(ls, rs, 0.18),
+        pointOnLine(ls, rs, 0.82),
+        pointOnLine(lh, rh, 0.16),
+        pointOnLine(lh, rh, 0.84),
+      )
+      ctx.fill()
+      ctx.stroke()
+    },
+  })
+
+  const addSegment = (a, b, radius) => {
+    if (!a || !b) return
+    parts.push({
+      depth: depthScore(a, b),
+      drawBase: () => drawCapsuleStyled(ctx, a, b, radius, fill, shadowEdge, outerStroke),
+      drawCore: () => drawCapsuleStyled(ctx, pointOnLine(a, b, 0.08), pointOnLine(a, b, 0.92), radius * 0.58, core, outline, innerStroke),
+    })
+  }
+
+  addSegment(ls, le, armUpperR)
+  addSegment(le, lw, armLowerR)
+  addSegment(rs, re, armUpperR)
+  addSegment(re, rw, armLowerR)
+  addSegment(lh, lk, legUpperR)
+  addSegment(lk, la, legLowerR)
+  addSegment(rh, rk, legUpperR)
+  addSegment(rk, ra, legLowerR)
+
+  const sortedParts = parts.sort((a, b) => a.depth - b.depth)
+  sortedParts.forEach((part) => part.drawBase())
+
+  ctx.shadowBlur = Math.max(2, glowStrength * 0.45)
+  ctx.globalAlpha = 0.34
+  sortedParts.forEach((part) => part.drawCore())
+
+  ctx.globalAlpha = 1
+
+  ctx.restore()
+}
+
+function drawJointPose(
+  ctx,
+  normXY,
+  x,
+  y,
+  w,
+  h,
+  { lineColor = '#d8eaff', pointColor = '#7dffc9', lineWidth = 2.2, pointRadius = 2.8 } = {},
+) {
   if (!normXY) return
   const pts = {}
   Object.entries(normXY).forEach(([k, [nx, ny]]) => {
-    const idx = Number(k)
-    pts[idx] = [x + nx * w, y + ny * h]
+    pts[Number(k)] = { x: x + nx * w, y: y + ny * h }
   })
 
   ctx.strokeStyle = lineColor
-  ctx.lineWidth = 2
+  ctx.lineWidth = lineWidth
   POSE_CONNECTIONS.forEach(([a, b]) => {
     if (!pts[a] || !pts[b]) return
     ctx.beginPath()
-    ctx.moveTo(...pts[a])
-    ctx.lineTo(...pts[b])
+    ctx.moveTo(pts[a].x, pts[a].y)
+    ctx.lineTo(pts[b].x, pts[b].y)
     ctx.stroke()
   })
 
   ctx.fillStyle = pointColor
-  Object.values(pts).forEach(([px, py]) => {
+  Object.values(pts).forEach((p) => {
     ctx.beginPath()
-    ctx.arc(px, py, 3, 0, Math.PI * 2)
+    ctx.arc(p.x, p.y, pointRadius, 0, Math.PI * 2)
     ctx.fill()
   })
+}
+
+function lowPassPose(prevPose, nextPose, alpha) {
+  if (!nextPose) return prevPose
+  if (!prevPose) return nextPose
+  const out = {}
+  const keys = new Set([...Object.keys(prevPose), ...Object.keys(nextPose)])
+  keys.forEach((k) => {
+    const prev = prevPose[k]
+    const next = nextPose[k]
+    if (!prev) {
+      out[k] = next
+      return
+    }
+    if (!next) {
+      out[k] = prev
+      return
+    }
+    out[k] = [lerp(prev[0], next[0], alpha), lerp(prev[1], next[1], alpha)]
+  })
+  return out
+}
+
+function landmarksToNormPose(lms, mirror = false) {
+  if (!lms?.length) return null
+  const pose = {}
+  ;[
+    LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER,
+    LM.LEFT_ELBOW, LM.RIGHT_ELBOW,
+    LM.LEFT_WRIST, LM.RIGHT_WRIST,
+    LM.LEFT_HIP, LM.RIGHT_HIP,
+    LM.LEFT_KNEE, LM.RIGHT_KNEE,
+    LM.LEFT_ANKLE, LM.RIGHT_ANKLE,
+  ].forEach((idx) => {
+    const p = lms[idx]
+    if (!p) return
+    pose[idx] = [mirror ? 1 - p.x : p.x, p.y]
+  })
+  return pose
 }
 
 export default function App() {
@@ -100,6 +360,8 @@ export default function App() {
   const currentMoveRef = useRef(null)
   const previousMoveRef = useRef(null)
   const moveTransitionStartRef = useRef(performance.now())
+  const smoothedCoachPoseRef = useRef(null)
+  const smoothedPlayerPoseRef = useRef(null)
   const queueTransitionRef = useRef({
     fromKeys: [],
     toKeys: [],
@@ -390,16 +652,22 @@ export default function App() {
         currentMoveRef.current?.norm_xy,
         moveProgress,
       )
+      smoothedCoachPoseRef.current = lowPassPose(smoothedCoachPoseRef.current, blendedPose, 0.35)
 
-      if (blendedPose) {
-        drawNormPose(
+      if (smoothedCoachPoseRef.current) {
+        drawCoachPose(
           ctx,
-          blendedPose,
+          smoothedCoachPoseRef.current,
           stageX + 45,
           stageY + 62,
           stageW - 90,
           stageH - 140,
-          { lineColor: '#f0f5ff', pointColor: '#47ffd5' },
+          {
+            fill: '#2f9eff',
+            core: '#8ce3ff',
+            glow: 'rgba(113, 213, 255, 0.95)',
+            glowStrength: 22,
+          },
         )
       }
 
@@ -445,14 +713,16 @@ export default function App() {
         ctx.lineWidth = isSoon ? 3 : 2
         ctx.stroke()
 
-        drawNormPose(
+        drawJointPose(
           ctx,
           m.norm_xy,
           queueX + 9,
           animatedY + 9,
           98,
           cardH - 18,
-          { lineColor: isSoon ? '#f2f8ff' : '#bbc8e3', pointColor: isSoon ? '#40ffd0' : '#ffd36f' },
+          isSoon
+            ? { lineColor: '#f0f8ff', pointColor: '#58ffd7', lineWidth: 2.4, pointRadius: 2.6 }
+            : { lineColor: '#bcc9e7', pointColor: '#ffd27d', lineWidth: 2, pointRadius: 2.2 },
         )
 
         ctx.fillStyle = '#f7f8ff'
@@ -475,27 +745,18 @@ export default function App() {
       ctx.drawImage(video, 0, 0, pipW, pipH)
       ctx.restore()
 
-      const lms = frame?.pose_landmarks
-      if (lms?.length) {
-        ctx.strokeStyle = '#f0f0f0'
-        ctx.lineWidth = 2
-        POSE_CONNECTIONS.forEach(([a, b]) => {
-          const pa = lms[a]
-          const pb = lms[b]
-          if (!pa || !pb) return
-          ctx.beginPath()
-          ctx.moveTo(pipX + pipW - pa.x * pipW, pipY + pa.y * pipH)
-          ctx.lineTo(pipX + pipW - pb.x * pipW, pipY + pb.y * pipH)
-          ctx.stroke()
-        })
-        ctx.fillStyle = '#4cff6a'
-        lms.forEach((p) => {
-          const x = pipX + pipW - p.x * pipW
-          const y = pipY + p.y * pipH
-          ctx.beginPath()
-          ctx.arc(x, y, 2.5, 0, Math.PI * 2)
-          ctx.fill()
-        })
+      const playerPose = landmarksToNormPose(frame?.pose_landmarks, true)
+      smoothedPlayerPoseRef.current = lowPassPose(smoothedPlayerPoseRef.current, playerPose, 0.45)
+      if (smoothedPlayerPoseRef.current) {
+        drawJointPose(
+          ctx,
+          smoothedPlayerPoseRef.current,
+          pipX + 20,
+          pipY + 10,
+          pipW - 40,
+          pipH - 18,
+          { lineColor: '#eef5ff', pointColor: '#5bff79', lineWidth: 2, pointRadius: 2.4 },
+        )
       }
 
       ctx.fillStyle = '#fff'
