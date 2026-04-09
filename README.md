@@ -93,6 +93,7 @@ Payload includes:
 - `POST /api/session/reset`
 - `POST /api/options`
 - `GET /api/config`
+- `GET /api/health`
 
 ### Video stream
 
@@ -127,6 +128,21 @@ Current defaults in `backend_server.py`:
 - Reference media path is read from chart `video_path`; file must exist in-repo for in-browser playback.
 - MJPEG stream is simple and broadly compatible, but not as bandwidth-efficient as WebRTC.
 - Single-player / single-webcam runtime.
+
+---
+
+## Troubleshooting start button / session not advancing
+
+If clicking **Start** keeps the app in idle/countdown or doesn’t score:
+
+1. Check backend health endpoint:
+   - `http://localhost:8000/api/health`
+2. Confirm model exists at:
+   - `models/pose_landmarker_full.task`
+3. Confirm webcam is not blocked by another app.
+4. Open browser devtools and verify `POST /api/session/start` returns `200`.
+
+The frontend now shows backend runtime errors directly in the feedback area, and it falls back to polling when WebSocket is unavailable.
 
 ---
 

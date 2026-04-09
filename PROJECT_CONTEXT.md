@@ -21,6 +21,7 @@ This project is a camera-based Just Dance prototype. It now includes both:
 5. Backend emits state snapshots over WebSocket.
 6. Frontend renders score/combo/feedback/current+upcoming moves.
 7. Frontend controls session/options via REST.
+8. Health/debug info available at `/api/health` and in `runtime_error` field from `/api/config` + `/ws/state`.
 
 ## JSON chart model
 - `pose.angles`: reference scoring embedding.

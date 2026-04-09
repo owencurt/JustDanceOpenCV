@@ -63,11 +63,14 @@ function updateUpcoming(moves) {
 }
 
 async function post(path, body) {
-  await fetch(path, {
+  const res = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : '{}',
   });
+  if (!res.ok) {
+    throw new Error(`Request failed (${res.status}) for ${path}`);
+  }
 }
 
 function applyState(s) {
@@ -78,6 +81,8 @@ function applyState(s) {
 
   if (s.feedback) {
     stateEls.feedback.textContent = `${s.feedback.tier.toUpperCase()} +${s.feedback.gained} (${s.feedback.move_name})`;
+  } else if (s.runtime_error) {
+    stateEls.feedback.textContent = `Backend issue: ${s.runtime_error}`;
   } else {
     stateEls.feedback.textContent = 'Keep moving!';
   }
@@ -98,9 +103,15 @@ async function bootstrap() {
     stateEls.referenceAudio.src = mediaPath;
   }
 
-  document.getElementById('startBtn').onclick = () => post('/api/session/start');
-  document.getElementById('pauseBtn').onclick = () => post('/api/session/pause-toggle');
-  document.getElementById('resetBtn').onclick = () => post('/api/session/reset');
+  document.getElementById('startBtn').onclick = async () => {
+    try { await post('/api/session/start'); } catch (e) { stateEls.feedback.textContent = String(e.message || e); }
+  };
+  document.getElementById('pauseBtn').onclick = async () => {
+    try { await post('/api/session/pause-toggle'); } catch (e) { stateEls.feedback.textContent = String(e.message || e); }
+  };
+  document.getElementById('resetBtn').onclick = async () => {
+    try { await post('/api/session/reset'); } catch (e) { stateEls.feedback.textContent = String(e.message || e); }
+  };
 
   const optMap = {
     webcamToggle: 'webcam_enabled',
@@ -113,7 +124,11 @@ async function bootstrap() {
     const el = document.getElementById(id);
     el.checked = initial.options[key];
     el.onchange = async () => {
-      await post('/api/options', { [key]: el.checked });
+      try {
+        await post('/api/options', { [key]: el.checked });
+      } catch (e) {
+        stateEls.feedback.textContent = String(e.message || e);
+      }
       if (key === 'reference_video_enabled') {
         stateEls.referenceVideo.style.display = el.checked ? 'block' : 'none';
       }
@@ -129,6 +144,17 @@ async function bootstrap() {
 
   const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/state');
   ws.onmessage = (ev) => applyState(JSON.parse(ev.data));
+  ws.onclose = async () => {
+    // Fallback when WS is unavailable (keeps controls/state functional).
+    setInterval(async () => {
+      try {
+        const state = await fetch('/api/config').then(r => r.json());
+        applyState(state);
+      } catch (_err) {
+        // no-op
+      }
+    }, 500);
+  };
 }
 
 bootstrap();

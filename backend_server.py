@@ -71,6 +71,8 @@ class DanceRuntime:
         self.current_move = None
         self.upcoming_moves = []
         self.latest_frame = None
+        self.runtime_error = None
+        self.last_loop_ts = None
 
         self.scoring_moves = load_choreography(SCORING_JSON_PATH)
         self.display_moves = load_choreography(CHOREO_JSON_PATH)
@@ -88,8 +90,15 @@ class DanceRuntime:
 
     def start_session(self):
         with self.lock:
+            # Match legacy behavior: start is always a fresh run.
+            self.scorer = ScoringEngine(self.scoring_moves, window_half_ms=WINDOW_HALF_MS, thresholds=DEFAULT_THRESHOLDS)
+            self.total_points = 0
+            self.combo = 0
+            self.best_combo = 0
+            self.last_feedback = None
             self.state = "countdown"
             self.countdown_deadline = time.monotonic() + START_COUNTDOWN_MS / 1000.0
+            self.running_zero_monotonic = None
 
     def pause_toggle(self):
         with self.lock:
@@ -130,7 +139,9 @@ class DanceRuntime:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         if not cap.isOpened():
-            raise RuntimeError("Could not open webcam")
+            with self.lock:
+                self.runtime_error = "Could not open webcam"
+            return
 
         options = PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=MODEL_PATH),
@@ -143,11 +154,26 @@ class DanceRuntime:
         )
 
         mp_ts_ms = 0
-        with PoseLandmarker.create_from_options(options) as landmarker:
+        try:
+            landmarker_ctx = PoseLandmarker.create_from_options(options)
+        except Exception as exc:
+            with self.lock:
+                self.runtime_error = f"PoseLandmarker init failed: {exc}"
+            cap.release()
+            return
+
+        with landmarker_ctx as landmarker:
             while not self._stop.is_set():
                 ok, frame = cap.read()
+                with self.lock:
+                    self.last_loop_ts = int(time.monotonic() * 1000)
                 if not ok:
+                    with self.lock:
+                        self.runtime_error = "Webcam frame grab failed"
+                    time.sleep(0.02)
                     continue
+                with self.lock:
+                    self.runtime_error = None
                 with self.lock:
                     webcam_enabled = self.options["webcam_enabled"]
                     show_landmarks = self.options["show_landmarks"]
@@ -212,6 +238,15 @@ class DanceRuntime:
 
     def state_payload(self):
         with self.lock:
+            # Keep game clock progression robust even if frame loop stalls.
+            if self.state == "countdown" and self.countdown_deadline is not None:
+                if int((self.countdown_deadline - time.monotonic()) * 1000) <= 0:
+                    self.state = "running"
+                    self.running_zero_monotonic = time.monotonic()
+                    self.game_ts_ms = 0
+            elif self.state == "running" and self.running_zero_monotonic is not None:
+                self.game_ts_ms = int((time.monotonic() - self.running_zero_monotonic) * 1000)
+
             feedback = self.last_feedback
             if feedback and self.game_ts_ms > feedback["show_until_ms"]:
                 feedback = None
@@ -237,6 +272,9 @@ class DanceRuntime:
                 "upcoming_moves": [move_json(m) for m in self.upcoming_moves],
                 "options": dict(self.options),
                 "chart_meta": self.chart_meta,
+                "runtime_error": self.runtime_error,
+                "runtime_alive": self._thread.is_alive(),
+                "last_loop_ts": self.last_loop_ts,
             }
 
     def mjpeg_stream(self):
@@ -267,6 +305,16 @@ def root():
 @app.get("/api/config")
 def api_config():
     return JSONResponse(runtime.state_payload())
+
+@app.get("/api/health")
+def api_health():
+    payload = runtime.state_payload()
+    return {
+        "ok": payload["runtime_alive"] and payload["runtime_error"] is None,
+        "runtime_alive": payload["runtime_alive"],
+        "runtime_error": payload["runtime_error"],
+        "last_loop_ts": payload["last_loop_ts"],
+    }
 
 
 @app.post("/api/session/start")
