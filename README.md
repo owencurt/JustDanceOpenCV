@@ -244,6 +244,7 @@ Add a media field at the chart root:
 
 - Gameplay timing remains driven by backend game clock (`game_ts_ms`).
 - Frontend continuously syncs media playback position to that clock to avoid drift.
+- Frame-upload flow now resets its in-flight send lock on WebSocket reconnect/close so countdown can always progress into running state after reconnects or chart changes.
 - If autoplay is blocked by browser policy, use a user interaction (for example Audio toggle, Start/Resume) and then resume; gameplay still runs even if audio cannot start.
 
 ---

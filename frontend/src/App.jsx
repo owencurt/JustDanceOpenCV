@@ -49,7 +49,10 @@ export default function App() {
   const captureRef = useRef(document.createElement('canvas'))
   const wsRef = useRef(null)
   const sendBusyRef = useRef(false)
+  const inFlightSocketRef = useRef(null)
   const serverFrameRef = useRef(null)
+  const mediaUrlRef = useRef('')
+  const audioEnabledRef = useRef(true)
 
   const [status, setStatus] = useState('Connecting...')
   const [charts, setCharts] = useState([])
@@ -60,29 +63,39 @@ export default function App() {
   const [audioStatus, setAudioStatus] = useState('Audio follows the chart media when available.')
 
   const canSendFrames = useMemo(() => !!wsRef.current && wsRef.current.readyState === WebSocket.OPEN, [status])
-
   const mediaUrl = chartMeta[choreoChart]?.media_url || ''
+
+  useEffect(() => {
+    mediaUrlRef.current = mediaUrl
+  }, [mediaUrl])
+
+  useEffect(() => {
+    audioEnabledRef.current = audioEnabled
+  }, [audioEnabled])
 
   const seekAndPause = (targetSec = 0) => {
     const media = audioRef.current
-    if (!media || !mediaUrl) return
+    const activeMediaUrl = mediaUrlRef.current
+    if (!media || !activeMediaUrl) return
+
     const clampedTarget = Math.max(0, targetSec)
     try {
       if (Math.abs((media.currentTime || 0) - clampedTarget) > 0.05) {
         media.currentTime = clampedTarget
       }
     } catch (_) {
-      // Some browsers can throw if metadata is not loaded yet.
+      // Metadata may not be available yet.
     }
     media.pause()
   }
 
   const syncAudioToFrame = (frame) => {
     const media = audioRef.current
-    if (!media || !mediaUrl || !frame) return
+    const activeMediaUrl = mediaUrlRef.current
+    if (!media || !activeMediaUrl || !frame) return
 
-    if (!audioEnabled) {
-      seekAndPause(frame.game_ts_ms ? frame.game_ts_ms / 1000 : 0)
+    if (!audioEnabledRef.current) {
+      seekAndPause((frame.game_ts_ms || 0) / 1000)
       return
     }
 
@@ -104,12 +117,7 @@ export default function App() {
       return
     }
 
-    if (frame.state === 'countdown') {
-      seekAndPause(0)
-      return
-    }
-
-    if (frame.state === 'idle') {
+    if (frame.state === 'countdown' || frame.state === 'idle') {
       seekAndPause(0)
     }
   }
@@ -175,11 +183,16 @@ export default function App() {
       wsRef.current.close()
     }
 
+    sendBusyRef.current = false
+    inFlightSocketRef.current = null
+
     const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
     const url = `${scheme}://${window.location.host}/ws/game`
     const ws = new WebSocket(url)
 
     ws.onopen = () => {
+      sendBusyRef.current = false
+      inFlightSocketRef.current = null
       setStatus('Connected')
       ws.send(JSON.stringify({
         scoring_chart: scoringChart,
@@ -199,11 +212,26 @@ export default function App() {
       } else if (data.type === 'error') {
         setStatus(`Error: ${data.error}`)
       }
-      sendBusyRef.current = false
+
+      if (inFlightSocketRef.current === ws) {
+        sendBusyRef.current = false
+        inFlightSocketRef.current = null
+      }
     }
 
     ws.onclose = () => {
+      if (inFlightSocketRef.current === ws) {
+        sendBusyRef.current = false
+        inFlightSocketRef.current = null
+      }
       setStatus('Disconnected')
+    }
+
+    ws.onerror = () => {
+      if (inFlightSocketRef.current === ws) {
+        sendBusyRef.current = false
+        inFlightSocketRef.current = null
+      }
     }
 
     wsRef.current = ws
@@ -218,8 +246,17 @@ export default function App() {
     const timer = setInterval(() => {
       const ws = wsRef.current
       const video = videoRef.current
-      if (!ws || ws.readyState !== WebSocket.OPEN || !video || sendBusyRef.current) return
+      if (!ws || ws.readyState !== WebSocket.OPEN || !video) return
       if (video.videoWidth === 0 || video.videoHeight === 0) return
+
+      if (sendBusyRef.current) {
+        if (inFlightSocketRef.current !== ws) {
+          sendBusyRef.current = false
+          inFlightSocketRef.current = null
+        } else {
+          return
+        }
+      }
 
       const c = captureRef.current
       c.width = 640
@@ -230,6 +267,7 @@ export default function App() {
       const imageB64 = dataUrl.split(',')[1]
 
       sendBusyRef.current = true
+      inFlightSocketRef.current = ws
       ws.send(JSON.stringify({ type: 'frame', image_b64: imageB64 }))
     }, 66)
 
@@ -408,6 +446,17 @@ export default function App() {
         src={mediaUrl || undefined}
         playsInline
         preload="auto"
+        onCanPlay={() => {
+          if (mediaUrlRef.current) {
+            setAudioStatus(audioEnabledRef.current ? 'Media can play. Audio will start with gameplay.' : 'Media can play. Audio is disabled.')
+          }
+        }}
+        onPlay={() => setAudioStatus('Audio is playing.')}
+        onPause={() => {
+          if (audioEnabledRef.current && serverFrameRef.current?.state === 'running') {
+            setAudioStatus('Audio paused unexpectedly. Browser policy or focus may have interrupted playback.')
+          }
+        }}
         onError={() => setAudioStatus('Failed to load chart media file. Check path and file location.')}
       />
     </div>
