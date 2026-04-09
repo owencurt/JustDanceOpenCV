@@ -1,10 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-const POSE_CONNECTIONS = [
-  [11, 13], [13, 15], [12, 14], [14, 16],
-  [11, 12], [11, 23], [12, 24], [23, 24],
-  [23, 25], [24, 26], [25, 27], [26, 28],
-]
+const LM = {
+  LEFT_SHOULDER: 11,
+  RIGHT_SHOULDER: 12,
+  LEFT_ELBOW: 13,
+  RIGHT_ELBOW: 14,
+  LEFT_WRIST: 15,
+  RIGHT_WRIST: 16,
+  LEFT_HIP: 23,
+  RIGHT_HIP: 24,
+  LEFT_KNEE: 25,
+  RIGHT_KNEE: 26,
+  LEFT_ANKLE: 27,
+  RIGHT_ANKLE: 28,
+}
 
 const FEEDBACK_COLORS = {
   perfect: '#50ff78',
@@ -60,30 +69,195 @@ function drawRoundedRect(ctx, x, y, w, h, r) {
   ctx.closePath()
 }
 
-function drawNormPose(ctx, normXY, x, y, w, h, { lineColor = '#ddd', pointColor = '#ffc800' } = {}) {
+function midpoint(a, b) {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+}
+
+function pointOnLine(a, b, t) {
+  return { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) }
+}
+
+function drawCapsule(ctx, a, b, radius) {
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const len = Math.hypot(dx, dy)
+  if (len < 1e-5) return
+
+  const nx = -dy / len
+  const ny = dx / len
+
+  ctx.beginPath()
+  ctx.moveTo(a.x + nx * radius, a.y + ny * radius)
+  ctx.lineTo(b.x + nx * radius, b.y + ny * radius)
+  ctx.arc(b.x, b.y, radius, Math.atan2(ny, nx), Math.atan2(-ny, -nx), false)
+  ctx.lineTo(a.x - nx * radius, a.y - ny * radius)
+  ctx.arc(a.x, a.y, radius, Math.atan2(-ny, -nx), Math.atan2(ny, nx), false)
+  ctx.closePath()
+}
+
+function drawLimb(ctx, a, b, c, upperRadius, lowerRadius) {
+  if (!a || !b) return
+  drawCapsule(ctx, a, b, upperRadius)
+  ctx.fill()
+  if (c) {
+    drawCapsule(ctx, b, c, lowerRadius)
+    ctx.fill()
+  }
+}
+
+function drawTorso(ctx, leftShoulder, rightShoulder, leftHip, rightHip) {
+  const shoulderCenter = midpoint(leftShoulder, rightShoulder)
+  const hipCenter = midpoint(leftHip, rightHip)
+  const spine = { x: hipCenter.x - shoulderCenter.x, y: hipCenter.y - shoulderCenter.y }
+  const spineLen = Math.max(1, Math.hypot(spine.x, spine.y))
+  const nx = -spine.y / spineLen
+  const ny = spine.x / spineLen
+
+  const shoulderWidth = Math.hypot(rightShoulder.x - leftShoulder.x, rightShoulder.y - leftShoulder.y)
+  const hipWidth = Math.hypot(rightHip.x - leftHip.x, rightHip.y - leftHip.y)
+  const shoulderBulge = shoulderWidth * 0.17
+  const hipBulge = hipWidth * 0.09
+
+  const ls = { x: leftShoulder.x - nx * shoulderBulge, y: leftShoulder.y - ny * shoulderBulge }
+  const rs = { x: rightShoulder.x + nx * shoulderBulge, y: rightShoulder.y + ny * shoulderBulge }
+  const lh = { x: leftHip.x - nx * hipBulge, y: leftHip.y - ny * hipBulge }
+  const rh = { x: rightHip.x + nx * hipBulge, y: rightHip.y + ny * hipBulge }
+
+  ctx.beginPath()
+  ctx.moveTo(ls.x, ls.y)
+  ctx.quadraticCurveTo(leftShoulder.x, leftShoulder.y, lh.x, lh.y)
+  ctx.quadraticCurveTo(hipCenter.x, hipCenter.y, rh.x, rh.y)
+  ctx.quadraticCurveTo(rightShoulder.x, rightShoulder.y, rs.x, rs.y)
+  ctx.quadraticCurveTo(shoulderCenter.x, shoulderCenter.y, ls.x, ls.y)
+  ctx.closePath()
+  ctx.fill()
+}
+
+function drawCoachPose(
+  ctx,
+  normXY,
+  x,
+  y,
+  w,
+  h,
+  {
+    fill = '#2ea5ff',
+    core = '#6fd5ff',
+    glow = 'rgba(150, 230, 255, 0.8)',
+    glowStrength = 18,
+  } = {},
+) {
   if (!normXY) return
   const pts = {}
   Object.entries(normXY).forEach(([k, [nx, ny]]) => {
     const idx = Number(k)
-    pts[idx] = [x + nx * w, y + ny * h]
+    pts[idx] = { x: x + nx * w, y: y + ny * h }
   })
 
-  ctx.strokeStyle = lineColor
-  ctx.lineWidth = 2
-  POSE_CONNECTIONS.forEach(([a, b]) => {
-    if (!pts[a] || !pts[b]) return
-    ctx.beginPath()
-    ctx.moveTo(...pts[a])
-    ctx.lineTo(...pts[b])
-    ctx.stroke()
-  })
+  const ls = pts[LM.LEFT_SHOULDER]
+  const rs = pts[LM.RIGHT_SHOULDER]
+  const le = pts[LM.LEFT_ELBOW]
+  const re = pts[LM.RIGHT_ELBOW]
+  const lw = pts[LM.LEFT_WRIST]
+  const rw = pts[LM.RIGHT_WRIST]
+  const lh = pts[LM.LEFT_HIP]
+  const rh = pts[LM.RIGHT_HIP]
+  const lk = pts[LM.LEFT_KNEE]
+  const rk = pts[LM.RIGHT_KNEE]
+  const la = pts[LM.LEFT_ANKLE]
+  const ra = pts[LM.RIGHT_ANKLE]
+  if (!ls || !rs || !lh || !rh) return
 
-  ctx.fillStyle = pointColor
-  Object.values(pts).forEach(([px, py]) => {
-    ctx.beginPath()
-    ctx.arc(px, py, 3, 0, Math.PI * 2)
-    ctx.fill()
+  const shoulderCenter = midpoint(ls, rs)
+  const hipCenter = midpoint(lh, rh)
+  const torsoLen = Math.max(24, Math.hypot(hipCenter.x - shoulderCenter.x, hipCenter.y - shoulderCenter.y))
+  const shoulderWidth = Math.max(20, Math.hypot(rs.x - ls.x, rs.y - ls.y))
+  const legLen = Math.max(
+    Math.hypot((lk?.x ?? lh.x) - lh.x, (lk?.y ?? lh.y) - lh.y) + Math.hypot((la?.x ?? lk?.x ?? lh.x) - (lk?.x ?? lh.x), (la?.y ?? lk?.y ?? lh.y) - (lk?.y ?? lh.y)),
+    Math.hypot((rk?.x ?? rh.x) - rh.x, (rk?.y ?? rh.y) - rh.y) + Math.hypot((ra?.x ?? rk?.x ?? rh.x) - (rk?.x ?? rh.x), (ra?.y ?? rk?.y ?? rh.y) - (rk?.y ?? rh.y)),
+  )
+
+  const headRadius = Math.max(14, shoulderWidth * 0.38)
+  const headOffset = torsoLen * 0.72
+  const bodyHeight = Math.max(torsoLen + legLen, 1)
+  const limbBase = Math.max(6, bodyHeight * 0.048)
+  const armUpperR = limbBase * 0.98
+  const armLowerR = limbBase * 0.83
+  const legUpperR = limbBase * 1.12
+  const legLowerR = limbBase * 0.98
+
+  const headCenter = pointOnLine(hipCenter, shoulderCenter, 1 + (headOffset / torsoLen))
+
+  ctx.save()
+  ctx.shadowColor = glow
+  ctx.shadowBlur = glowStrength
+
+  ctx.fillStyle = fill
+  drawTorso(ctx, ls, rs, lh, rh)
+  drawLimb(ctx, ls, le, lw, armUpperR, armLowerR)
+  drawLimb(ctx, rs, re, rw, armUpperR, armLowerR)
+  drawLimb(ctx, lh, lk, la, legUpperR, legLowerR)
+  drawLimb(ctx, rh, rk, ra, legUpperR, legLowerR)
+  ctx.beginPath()
+  ctx.arc(headCenter.x, headCenter.y, headRadius, 0, Math.PI * 2)
+  ctx.fill()
+
+  ctx.lineWidth = Math.max(2.5, limbBase * 0.34)
+  ctx.strokeStyle = 'rgba(227, 247, 255, 0.95)'
+  ctx.stroke()
+
+  ctx.shadowBlur = Math.max(2, glowStrength * 0.45)
+  ctx.fillStyle = core
+  ctx.globalAlpha = 0.35
+  drawTorso(ctx, pointOnLine(ls, rs, 0.2), pointOnLine(ls, rs, 0.8), pointOnLine(lh, rh, 0.18), pointOnLine(lh, rh, 0.82))
+  drawLimb(ctx, pointOnLine(ls, le || ls, 0.08), pointOnLine(ls, le || ls, 0.9), lw && pointOnLine(le || ls, lw, 0.82), armUpperR * 0.6, armLowerR * 0.55)
+  drawLimb(ctx, pointOnLine(rs, re || rs, 0.08), pointOnLine(rs, re || rs, 0.9), rw && pointOnLine(re || rs, rw, 0.82), armUpperR * 0.6, armLowerR * 0.55)
+  drawLimb(ctx, pointOnLine(lh, lk || lh, 0.08), pointOnLine(lh, lk || lh, 0.9), la && pointOnLine(lk || lh, la, 0.82), legUpperR * 0.58, legLowerR * 0.52)
+  drawLimb(ctx, pointOnLine(rh, rk || rh, 0.08), pointOnLine(rh, rk || rh, 0.9), ra && pointOnLine(rk || rh, ra, 0.82), legUpperR * 0.58, legLowerR * 0.52)
+  ctx.beginPath()
+  ctx.arc(headCenter.x, headCenter.y, headRadius * 0.62, 0, Math.PI * 2)
+  ctx.fill()
+
+  ctx.restore()
+}
+
+function lowPassPose(prevPose, nextPose, alpha) {
+  if (!nextPose) return prevPose
+  if (!prevPose) return nextPose
+  const out = {}
+  const keys = new Set([...Object.keys(prevPose), ...Object.keys(nextPose)])
+  keys.forEach((k) => {
+    const prev = prevPose[k]
+    const next = nextPose[k]
+    if (!prev) {
+      out[k] = next
+      return
+    }
+    if (!next) {
+      out[k] = prev
+      return
+    }
+    out[k] = [lerp(prev[0], next[0], alpha), lerp(prev[1], next[1], alpha)]
   })
+  return out
+}
+
+function landmarksToNormPose(lms, mirror = false) {
+  if (!lms?.length) return null
+  const pose = {}
+  ;[
+    LM.LEFT_SHOULDER, LM.RIGHT_SHOULDER,
+    LM.LEFT_ELBOW, LM.RIGHT_ELBOW,
+    LM.LEFT_WRIST, LM.RIGHT_WRIST,
+    LM.LEFT_HIP, LM.RIGHT_HIP,
+    LM.LEFT_KNEE, LM.RIGHT_KNEE,
+    LM.LEFT_ANKLE, LM.RIGHT_ANKLE,
+  ].forEach((idx) => {
+    const p = lms[idx]
+    if (!p) return
+    pose[idx] = [mirror ? 1 - p.x : p.x, p.y]
+  })
+  return pose
 }
 
 export default function App() {
@@ -100,6 +274,8 @@ export default function App() {
   const currentMoveRef = useRef(null)
   const previousMoveRef = useRef(null)
   const moveTransitionStartRef = useRef(performance.now())
+  const smoothedCoachPoseRef = useRef(null)
+  const smoothedPlayerPoseRef = useRef(null)
   const queueTransitionRef = useRef({
     fromKeys: [],
     toKeys: [],
@@ -390,16 +566,22 @@ export default function App() {
         currentMoveRef.current?.norm_xy,
         moveProgress,
       )
+      smoothedCoachPoseRef.current = lowPassPose(smoothedCoachPoseRef.current, blendedPose, 0.35)
 
-      if (blendedPose) {
-        drawNormPose(
+      if (smoothedCoachPoseRef.current) {
+        drawCoachPose(
           ctx,
-          blendedPose,
+          smoothedCoachPoseRef.current,
           stageX + 45,
           stageY + 62,
           stageW - 90,
           stageH - 140,
-          { lineColor: '#f0f5ff', pointColor: '#47ffd5' },
+          {
+            fill: '#2f9eff',
+            core: '#8ce3ff',
+            glow: 'rgba(113, 213, 255, 0.95)',
+            glowStrength: 22,
+          },
         )
       }
 
@@ -445,14 +627,16 @@ export default function App() {
         ctx.lineWidth = isSoon ? 3 : 2
         ctx.stroke()
 
-        drawNormPose(
+        drawCoachPose(
           ctx,
           m.norm_xy,
           queueX + 9,
           animatedY + 9,
           98,
           cardH - 18,
-          { lineColor: isSoon ? '#f2f8ff' : '#bbc8e3', pointColor: isSoon ? '#40ffd0' : '#ffd36f' },
+          isSoon
+            ? { fill: '#37a7ff', core: '#abebff', glow: 'rgba(120, 218, 255, 0.85)', glowStrength: 12 }
+            : { fill: '#718dc9', core: '#b3c8ef', glow: 'rgba(148, 172, 219, 0.5)', glowStrength: 7 },
         )
 
         ctx.fillStyle = '#f7f8ff'
@@ -475,27 +659,23 @@ export default function App() {
       ctx.drawImage(video, 0, 0, pipW, pipH)
       ctx.restore()
 
-      const lms = frame?.pose_landmarks
-      if (lms?.length) {
-        ctx.strokeStyle = '#f0f0f0'
-        ctx.lineWidth = 2
-        POSE_CONNECTIONS.forEach(([a, b]) => {
-          const pa = lms[a]
-          const pb = lms[b]
-          if (!pa || !pb) return
-          ctx.beginPath()
-          ctx.moveTo(pipX + pipW - pa.x * pipW, pipY + pa.y * pipH)
-          ctx.lineTo(pipX + pipW - pb.x * pipW, pipY + pb.y * pipH)
-          ctx.stroke()
-        })
-        ctx.fillStyle = '#4cff6a'
-        lms.forEach((p) => {
-          const x = pipX + pipW - p.x * pipW
-          const y = pipY + p.y * pipH
-          ctx.beginPath()
-          ctx.arc(x, y, 2.5, 0, Math.PI * 2)
-          ctx.fill()
-        })
+      const playerPose = landmarksToNormPose(frame?.pose_landmarks, true)
+      smoothedPlayerPoseRef.current = lowPassPose(smoothedPlayerPoseRef.current, playerPose, 0.45)
+      if (smoothedPlayerPoseRef.current) {
+        drawCoachPose(
+          ctx,
+          smoothedPlayerPoseRef.current,
+          pipX + 20,
+          pipY + 10,
+          pipW - 40,
+          pipH - 18,
+          {
+            fill: '#f36bff',
+            core: '#ffd5ff',
+            glow: 'rgba(255, 136, 245, 0.88)',
+            glowStrength: 14,
+          },
+        )
       }
 
       ctx.fillStyle = '#fff'
