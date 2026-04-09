@@ -96,11 +96,10 @@ async function bootstrap() {
   const initial = await fetch('/api/config').then(r => r.json());
   applyState(initial);
 
-  const displayVideo = initial.chart_meta?.display?.video_path;
-  if (displayVideo) {
-    const mediaPath = `/media/${displayVideo}`;
-    stateEls.referenceVideo.src = mediaPath;
-    stateEls.referenceAudio.src = mediaPath;
+  const displayVideoUrl = initial.chart_meta?.display?.video_url;
+  if (displayVideoUrl) {
+    stateEls.referenceVideo.src = displayVideoUrl;
+    stateEls.referenceAudio.src = displayVideoUrl;
   }
 
   document.getElementById('startBtn').onclick = async () => {

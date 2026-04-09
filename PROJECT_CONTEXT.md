@@ -30,7 +30,7 @@ This project is a camera-based Just Dance prototype. It now includes both:
 
 ## Constraints
 - Model file required at `models/pose_landmarker_full.task`.
-- `video_path` in chart metadata must point to a playable local media path for browser playback.
+- Browser reference playback uses resolved `video_url` from backend metadata; absolute authoring paths may require placing media under `media/` or `reference_poses/`.
 
 ## Known limitations
 - MJPEG webcam transport (not WebRTC).

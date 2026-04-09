@@ -85,6 +85,7 @@ Payload includes:
 - `upcoming_moves[]`
 - `options`
 - `chart_meta`
+  - includes `video_url` (resolved browser-playable URL if source media is found locally)
 
 ### REST
 
@@ -125,7 +126,7 @@ Current defaults in `backend_server.py`:
 
 ## Known limitations
 
-- Reference media path is read from chart `video_path`; file must exist in-repo for in-browser playback.
+- Reference media playback now uses resolved `chart_meta.display.video_url`. If chart `video_path` is an absolute authoring path, backend tries local fallbacks (`media/<basename>` then `reference_poses/<basename>`).
 - MJPEG stream is simple and broadly compatible, but not as bandwidth-efficient as WebRTC.
 - Single-player / single-webcam runtime.
 

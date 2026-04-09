@@ -8,7 +8,7 @@ from typing import Dict, Any
 
 import cv2
 import mediapipe as mp
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -31,14 +31,47 @@ START_COUNTDOWN_MS = 3000
 
 def _load_chart_metadata(path: str) -> Dict[str, Any]:
     chart = json.loads(Path(path).read_text())
+    video_path = chart.get("video_path")
     return {
         "path": path,
         "title": chart.get("title"),
-        "video_path": chart.get("video_path"),
+        "video_path": video_path,
+        "video_url": _resolve_chart_video_url(video_path),
         "bpm": chart.get("bpm"),
         "offset_ms": chart.get("offset_ms"),
         "move_count": len(chart.get("moves", [])),
     }
+
+
+def _resolve_chart_video_url(video_path: str | None) -> str | None:
+    """
+    Convert chart `video_path` into a browser-servable `/media/...` URL when possible.
+    Handles absolute authoring paths by falling back to known local media locations.
+    """
+    if not video_path:
+        return None
+
+    repo_root = Path(".").resolve()
+    p = Path(video_path)
+    candidates = []
+
+    if p.is_absolute():
+        # 1) direct absolute path (works only on same machine)
+        candidates.append(p)
+        # 2) basename fallbacks for portable repos
+        candidates.append(repo_root / "media" / p.name)
+        candidates.append(repo_root / "reference_poses" / p.name)
+    else:
+        candidates.append((repo_root / p).resolve())
+
+    for c in candidates:
+        if c.exists() and c.is_file():
+            try:
+                rel = c.resolve().relative_to(repo_root)
+                return f"/media/{rel.as_posix()}"
+            except ValueError:
+                continue
+    return None
 
 
 class OptionUpdate(BaseModel):
@@ -87,6 +120,11 @@ class DanceRuntime:
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.5)
 
     def start_session(self):
         with self.lock:
@@ -292,9 +330,9 @@ class DanceRuntime:
             time.sleep(0.03)
 
 
-runtime = DanceRuntime()
 app = FastAPI(title="JustDanceOpenCV Frontend Server")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+runtime: DanceRuntime | None = None
 
 frontend_dir = Path("frontend")
 app.mount("/assets", StaticFiles(directory=frontend_dir), name="assets")
@@ -305,14 +343,31 @@ app.mount("/media", StaticFiles(directory="."), name="media")
 def root():
     return FileResponse(frontend_dir / "index.html")
 
+@app.on_event("startup")
+def on_startup():
+    global runtime
+    runtime = DanceRuntime()
+
+@app.on_event("shutdown")
+def on_shutdown():
+    global runtime
+    if runtime is not None:
+        runtime.stop()
+        runtime = None
+
+def get_runtime() -> DanceRuntime:
+    if runtime is None:
+        raise HTTPException(status_code=503, detail="Runtime not ready")
+    return runtime
+
 
 @app.get("/api/config")
 def api_config():
-    return JSONResponse(runtime.state_payload())
+    return JSONResponse(get_runtime().state_payload())
 
 @app.get("/api/health")
 def api_health():
-    payload = runtime.state_payload()
+    payload = get_runtime().state_payload()
     return {
         "ok": payload["runtime_alive"] and payload["runtime_error"] is None,
         "runtime_alive": payload["runtime_alive"],
@@ -323,31 +378,31 @@ def api_health():
 
 @app.post("/api/session/start")
 def start_session():
-    runtime.start_session()
+    get_runtime().start_session()
     return {"ok": True}
 
 
 @app.post("/api/session/pause-toggle")
 def pause_toggle():
-    runtime.pause_toggle()
+    get_runtime().pause_toggle()
     return {"ok": True}
 
 
 @app.post("/api/session/reset")
 def reset_session():
-    runtime.reset_session()
+    get_runtime().reset_session()
     return {"ok": True}
 
 
 @app.post("/api/options")
 def set_options(options: OptionUpdate):
-    runtime.update_options(options)
+    get_runtime().update_options(options)
     return {"ok": True}
 
 
 @app.get("/video/feed")
 def video_feed():
-    return StreamingResponse(runtime.mjpeg_stream(), media_type="multipart/x-mixed-replace; boundary=frame")
+    return StreamingResponse(get_runtime().mjpeg_stream(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.websocket("/ws/state")
@@ -355,7 +410,7 @@ async def ws_state(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            await websocket.send_json(runtime.state_payload())
+            await websocket.send_json(get_runtime().state_payload())
             await asyncio.sleep(0.1)
     except WebSocketDisconnect:
         return
